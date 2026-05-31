@@ -259,6 +259,8 @@ impl App {
             }
             if state.draw2d.circle_instance_count > 0 {
                 pass.set_pipeline(&state.draw2d.circle_pipeline);
+                pass.set_bind_group(0, &state.draw2d.bind_group, &[]);
+                pass.set_vertex_buffer(0, state.draw2d.quad_vbo.slice(..));
                 pass.set_vertex_buffer(1, state.draw2d.circle_instance_buf.slice(..));
                 pass.draw(0..6, 0..state.draw2d.circle_instance_count);
             }

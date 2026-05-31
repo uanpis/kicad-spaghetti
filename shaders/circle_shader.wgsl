@@ -41,17 +41,17 @@ fn vs_main(in: VertIn) -> VertOut {
 fn fs_main(in: VertOut) -> @location(0) vec4<f32> {
     let dist = length(in.local_pos);
 
+	/*
     // Feather ~1.5 pixels wide regardless of zoom
     let feather = 1.5 / max(in.radius_px, 1.0);
     let alpha   = smoothstep(1.0, 1.0 - feather, dist);
     if alpha <= 0.0 { discard; }
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
+	*/
 
-	/*
 	if dist > in.radius_px {
 		discard;
 	}
     return vec4<f32>(in.color.rgba);
-	*/
 
 }

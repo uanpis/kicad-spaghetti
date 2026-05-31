@@ -139,12 +139,6 @@ impl Draw2D {
             }],
         });
 
-        let circle_instance_attrs = wgpu::vertex_attr_array![
-            1 => Float32x2,   // center
-            2 => Float32,     // radius
-            3 => Float32x4,   // color   (location 3; _pad is skipped by wgpu automatically
-        ];
-
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("BG"),
             layout: &bind_group_layout,
@@ -209,29 +203,16 @@ impl Draw2D {
         }
 
         let quad_attrs = wgpu::vertex_attr_array![0 => Float32x2];
-        let circle_instance_attrs = [
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 0,
-                shader_location: 1,
-            }, // center
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32,
-                offset: 8,
-                shader_location: 2,
-            }, // radius
-            // offset 12 = _pad (4 bytes, skipped)
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 16,
-                shader_location: 3,
-            }, // color
-        ];
         let instance_attrs = wgpu::vertex_attr_array![
             1 => Float32x2,  // p0
             2 => Float32x2,  // p1
             3 => Float32,    // radius
             4 => Float32x4,  // color
+        ];
+        let circle_instance_attrs = wgpu::vertex_attr_array![
+            1 => Float32x2,   // center
+            2 => Float32,     // radius
+            3 => Float32x4,   // color
         ];
         let debug_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
@@ -259,17 +240,15 @@ impl Draw2D {
         let circle_pipeline = create_pipeline(
             device,
             "Circle SDF Pipeline",
-            &pipeline_layout, // reuses the same layout (same bind group)
+            &pipeline_layout,
             &circle_shader,
             &[
                 wgpu::VertexBufferLayout {
-                    // slot 0 — shared unit quad
                     array_stride: 8,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &quad_attrs,
                 },
                 wgpu::VertexBufferLayout {
-                    // slot 1 — per-circle instances
                     array_stride: std::mem::size_of::<CircleInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &circle_instance_attrs,
