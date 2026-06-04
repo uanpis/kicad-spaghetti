@@ -1,5 +1,6 @@
 use crate::physics::*;
-use crate::tree::{QTreeItem, QuadTree};
+use crate::tree::{Node, QTreeItem, QuadTree};
+use crate::typed_idx::Idx;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use glam::Vec2;
 use kicad_ipc_rs::{KiCadClientBlocking, KiCadError, model::board::PcbItem};
@@ -12,13 +13,19 @@ pub enum Command {
     Import,
     Pause,
     Resume,
+    Reset,
 }
 
 const SCALING_FACTOR: f32 = 1e-6f32; // nm -> mm
 
+pub struct SimSettings {
+    pub damping: f32,
+}
+
 pub struct Sim {
     tx: Sender<Command>,
     rx: Receiver<Snapshot>,
+    pub sim_settings: SimSettings,
     pub snapshot: Snapshot,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -38,6 +45,7 @@ impl Sim {
             rx,
             snapshot,
             handle: Some(handle),
+            sim_settings: SimSettings { damping: 1.0 },
         }
     }
 
@@ -69,6 +77,10 @@ impl Sim {
 
     pub fn resume(&self) {
         self.cmd(Command::Resume);
+    }
+
+    pub fn reset(&self) {
+        self.cmd(Command::Reset);
     }
 }
 
@@ -110,6 +122,7 @@ struct Data {
     points: Vec<Point>,
     edges: Vec<Edge>,
     tree: Option<QuadTree<Point, PointNodeData>>,
+    net_trees: Vec<QuadTree<Point, PointNodeData>>,
 }
 
 impl Data {
@@ -120,6 +133,7 @@ impl Data {
         let points = Vec::<Point>::new();
         let edges = Vec::<Edge>::new();
         let tree = None;
+        let net_trees = Vec::<QuadTree<Point, PointNodeData>>::new();
         Self {
             debug,
             iterations: 0,
@@ -128,17 +142,31 @@ impl Data {
             points,
             edges,
             tree,
+            net_trees,
         }
     }
 
-    fn _rebuild_tree(&mut self) {
-        let pos = self.tree.as_ref().unwrap().get_pos();
-        let rad = self.tree.as_ref().unwrap().get_rad();
-        let mut tree = QuadTree::<Point, PointNodeData>::new(pos, rad);
-        for i in 0..self.points.len() {
-            tree.insert_item(None, &mut self.points, i);
+    fn rebuild_tree(&mut self) {
+        if let Some(tree) = self.tree.as_mut() {
+            tree.clear();
+            for i in 0..self.points.len() {
+                tree.insert_item(None, &mut self.points, i);
+            }
+            tree.update_bottom_up(&self.points);
         }
-        self.tree = Some(tree);
+    }
+
+    fn rebuild_net_trees(&mut self) {
+        for net in 0..self.net_map.len() {
+            self.net_trees[net].clear();
+        }
+        for i in 0..self.points.len() {
+            let net = self.points[i].net;
+            self.net_trees[net].insert_item(None, &mut self.points, i);
+        }
+        for net in 0..self.net_map.len() {
+            self.net_trees[net].update_bottom_up(&self.points);
+        }
     }
 
     fn add_point(&mut self, point: Point) -> usize {
@@ -157,6 +185,61 @@ impl Data {
                 .unwrap()
                 .insert_item(None, &mut self.points, i);
             i
+        }
+    }
+
+    fn sort_points(&mut self) {
+        fn f32_to_ordered_u32(f: f32) -> u32 {
+            let bits = f.to_bits();
+            if bits >> 31 == 0 {
+                bits | 0x8000_0000
+            } else {
+                !bits
+            }
+        }
+        fn morton(pos: Vec2) -> u64 {
+            let xi = f32_to_ordered_u32(pos.x);
+            let yi = f32_to_ordered_u32(pos.y);
+            spread(xi) | (spread(yi) << 1)
+        }
+        fn spread(x: u32) -> u64 {
+            let mut x = x as u64;
+            x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
+            x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
+            x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+            x = (x | (x << 2)) & 0x3333_3333_3333_3333;
+            x = (x | (x << 1)) & 0x5555_5555_5555_5555;
+            x
+        }
+
+        let mut indices: Vec<usize> = (0..self.points.len()).collect();
+        indices.sort_unstable_by_key(|&i| morton(self.points[i].pos));
+
+        let mut inverse = vec![0usize; indices.len()];
+        for (new, &old) in indices.iter().enumerate() {
+            inverse[old] = new;
+        }
+
+        for i in 0..self.points.len() {
+            if indices[i] == usize::MAX || indices[i] == i {
+                indices[i] = usize::MAX;
+                continue;
+            }
+            let mut current = i;
+            loop {
+                let target = indices[current];
+                indices[current] = usize::MAX;
+                if target == i || target == usize::MAX {
+                    break;
+                }
+                self.points.swap(current, target);
+                current = target;
+            }
+        }
+
+        for edge in &mut self.edges {
+            edge.i0 = inverse[edge.i0];
+            edge.i1 = inverse[edge.i1];
         }
     }
 
@@ -191,7 +274,6 @@ impl Data {
                     conv_nm!($v.unwrap().x_nm),
                     conv_nm!($v.unwrap().y_nm),
                     $r,
-                    None,
                     $n
                 )
             };
@@ -260,8 +342,16 @@ impl Data {
             self.edges.push(edge!(i0, i1, w, l0));
         }
 
+        for _ in 0..self.net_map.len() {
+            self.net_trees
+                .push(QuadTree::<Point, PointNodeData>::new(root_pos, root_rad));
+        }
+
         self.resample();
+        self.sort_points();
         self.compute_neighbors();
+        self.rebuild_tree();
+        self.rebuild_net_trees();
 
         Ok(())
     }
@@ -297,7 +387,7 @@ impl Data {
             let l0 = len / n as f32;
             if n > 1 {
                 let delta = (p1 - p0) / n as f32;
-                let mut end = point!(p0 + delta, 0.5 * w, None, net);
+                let mut end = point!(p0 + delta, 0.5 * w, net);
                 let mut iend = self.add_point(end);
 
                 self.edges[i].i1 = iend;
@@ -307,7 +397,7 @@ impl Data {
                 for j in 2..n + 1 {
                     istart = iend;
 
-                    end = point!(p0 + delta * j as f32, 0.5 * w, None, net);
+                    end = point!(p0 + delta * j as f32, 0.5 * w, net);
                     iend = self.add_point(end);
                     self.edges.push(edge!(istart, iend, w, l0));
                 }
@@ -321,6 +411,48 @@ impl Data {
             self.points[edge.i1].neighbors += 1;
         }
     }
+
+    fn calculate_force(
+        &mut self,
+        stack: &mut Vec<(Idx<Node<Point, PointNodeData>>, f32)>,
+        index: usize,
+    ) -> Vec2 {
+        let mut calc = |tree: &mut QuadTree<Point, PointNodeData>, i: usize| -> Vec2 {
+            let mut force = Vec2::ZERO;
+            stack.clear();
+            stack.push((tree.root, tree.rad));
+            while let Some((node, rad)) = stack.pop() {
+                let pos = self.points[i].pos;
+                let offset = pos - tree.nodes[node].data.all.pos;
+                let distsq = offset.length_squared();
+                let metric = 0.5;
+                if rad * rad / distsq < metric * metric {
+                    let distsq = distsq.max(0.1);
+                    force += tree.nodes[node].data.all.radius * offset / (distsq * distsq);
+                } else {
+                    if tree.nodes[node].is_leaf {
+                        for j in tree.nodes[node].items[0..tree.nodes[node].nitems].iter() {
+                            let offset = pos - self.points[*j].pos;
+                            let distsq = offset.length_squared().max(0.1);
+                            force += self.points[*j].radius * offset / (distsq * distsq);
+                        }
+                    } else {
+                        for child in tree.nodes[node]
+                            .children
+                            .iter()
+                            .filter(|x| x.as_usize() != 0usize)
+                        {
+                            stack.push((*child, rad * 0.5));
+                        }
+                    }
+                }
+            }
+            force
+        };
+        let all = calc(self.tree.as_mut().unwrap(), index);
+        let net = calc(&mut self.net_trees[self.points[index].net], index);
+        all - net
+    }
 }
 
 fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
@@ -329,6 +461,9 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
     let mut running = true;
     let mut paused = false;
     let delta = 0.05;
+
+    let mut stack = Vec::<(Idx<Node<Point, PointNodeData>>, f32)>::new();
+
     while running {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
@@ -345,69 +480,20 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
                 Command::Resume => {
                     paused = false;
                 }
+                Command::Reset => {
+                    data = Data::new(true);
+                    data.import().expect("Could not import PCB from KiCad");
+                    data.send(&tx);
+                }
             }
         }
         if !paused {
             data.iterations += 1;
-            for i in 0..data.points.len() {
-                let tree = data.tree.as_mut().unwrap();
-                let root = tree.root.as_usize();
-                let net = data.points[i].net;
 
-                struct GetForce<'s> {
-                    f: &'s dyn Fn(&GetForce, usize) -> Vec2,
-                }
-                let get_force = GetForce {
-                    f: &|get_force, node: usize| -> Vec2 {
-                        let (offset, mass) =
-                            if let Some(netidx) = tree.data[node].net_table.get(&net) {
-                                (
-                                    data.points[i].pos
-                                        - tree.data[node].virtual_points[*netidx].other_pos,
-                                    tree.data[node].sum_all.mass
-                                        - tree.data[node].virtual_points[*netidx].mass,
-                                )
-                            } else {
-                                (
-                                    data.points[i].pos - tree.data[node].sum_all.pos,
-                                    tree.data[node].sum_all.mass,
-                                )
-                            };
-                        let distance = offset.length();
-                        let rad = tree.nodes[node].rad;
-                        // metric
-                        if rad / distance < 0.5 {
-                            // 1 / rsq force
-                            mass * offset / (distance * distance * distance)
-                        } else {
-                            // recurse for children
-                            if !tree.nodes[node].is_leaf {
-                                tree.nodes[node]
-                                    .children
-                                    .iter()
-                                    .flatten()
-                                    .fold(Vec2::ZERO, |acc, child| {
-                                        acc + (get_force.f)(get_force, child.as_usize())
-                                    })
-                            } else {
-                                tree.nodes[node]
-                                    .items
-                                    .iter()
-                                    .flatten()
-                                    .filter(|x| data.points[**x].net != net)
-                                    .map(|x| {
-                                        let offset = data.points[i].pos - data.points[*x].pos;
-                                        let distance = offset.length();
-                                        let mass = data.points[*x].mass;
-                                        mass * offset / (distance * distance * distance)
-                                    })
-                                    .sum()
-                            }
-                        }
-                    },
-                };
-                let f = 0.01 * (get_force.f)(&get_force, root);
-                //data.points[i].apply_force(f);
+            for i in 0..data.points.len() {
+                let force = data.calculate_force(&mut stack, i);
+                let mass = data.points[i].radius;
+                data.points[i].apply_force(mass * force);
             }
 
             for edge in &data.edges {
@@ -415,14 +501,16 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
             }
 
             for i in 0..data.points.len() {
-                let tree = data.tree.as_mut().unwrap();
                 let point = &mut data.points[i];
-                point.v *= 0.999;
+                point.v *= 0.998;
                 point.step(delta);
-                tree.update_item(&mut data.points, i);
             }
-            data.tree.as_mut().unwrap().update_bottom_up(&data.points);
-            //data.rebuild_tree();
+
+            if data.iterations.is_multiple_of(64) {
+                data.sort_points();
+            }
+            data.rebuild_tree();
+            data.rebuild_net_trees();
         } else {
             thread::sleep(std::time::Duration::from_millis(16));
         }

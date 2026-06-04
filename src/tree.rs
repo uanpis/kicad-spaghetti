@@ -15,102 +15,81 @@ const BOTTOM_RIGHT: Vec2 = Vec2::new(1.0, 1.0);
 const CORNERS: [Vec2; 4] = [TOP_LEFT, BOTTOM_LEFT, TOP_RIGHT, BOTTOM_RIGHT];
 
 pub trait QTreeData<T, D> {
-    // TODO make generic
-    fn new(node: Option<Idx<Node<T, D>>>) -> D;
-    fn set_node(&mut self, node: Option<Idx<Node<T, D>>>);
-    fn update_pos(data: &mut [D], idx: Idx<D>, nodes: &[Node<T, D>], items: &[T]);
-    fn update_mass(&mut self, items: &[T], item: Idx<T>, mass: f32);
+    fn new() -> Self;
+    fn update_leaf(self_idx: Idx<Node<T, D>>, nodes: &mut [Node<T, D>], items: &[T]);
+    fn update_internal(self_idx: Idx<Node<T, D>>, nodes: &mut [Node<T, D>]);
 }
 
-pub trait QTreeItem<T, D> {
+pub trait QTreeItem {
     fn get_pos(&self) -> Vec2;
-    fn set_parent(&mut self, parent: Option<Idx<Node<T, D>>>);
-    fn get_parent(&self) -> Option<Idx<Node<T, D>>>;
-    fn set_index(&mut self, index: usize);
-    fn get_index(&self) -> usize;
 }
 
 #[derive(Clone)]
 pub struct QuadTree<T, D> {
     pub nodes: Vec<Node<T, D>>,
-    pub data: Vec<D>,
-    pub free_list: Vec<Idx<Node<T, D>>>,
-
     pub root: Idx<Node<T, D>>,
+    pub rad: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Node<T, D> {
     pub is_leaf: bool,
-    pub len: usize,
 
     // geometry
     pub pos: Vec2,
-    pub rad: f32,
-    pub data: Option<Idx<D>>,
+    pub data: D,
 
     // indices of items
     pub nitems: usize,
-    pub items: [Option<Idx<T>>; BUCKET_SIZE],
-    pub free_list: [usize; BUCKET_SIZE],
+    pub items: [Idx<T>; BUCKET_SIZE],
 
-    pub parent: Option<Idx<Node<T, D>>>, // index of parent node
-    pub child_count: usize,
-    pub children: [Option<Idx<Node<T, D>>>; 4], // indices of child nodes
+    pub children: [Idx<Node<T, D>>; 4], // indices of child nodes
 }
 
-impl<T, D> Node<T, D> {
-    fn new(pos: Vec2, rad: f32, parent: Option<Idx<Node<T, D>>>, data: Option<Idx<D>>) -> Self {
+impl<T, D: QTreeData<T, D>> Node<T, D> {
+    fn new(pos: Vec2) -> Self {
         Self {
             is_leaf: true,
-            len: 0usize,
 
             pos,
-            rad,
-            data,
+            data: D::new(),
 
             nitems: 0usize,
-            items: [None; BUCKET_SIZE],
-            free_list: std::array::from_fn(|i| i),
-
-            parent,
-            child_count: 0usize,
-            children: [None; 4],
+            items: [idx::<T>(0); BUCKET_SIZE],
+            children: [idx::<Node<T, D>>(0); 4],
         }
     }
 
     fn insert(&mut self, item: Idx<T>) -> usize {
-        let i = self.free_list[self.nitems];
+        let i = self.nitems;
         self.nitems += 1;
-        self.items[i] = Some(item);
+        self.items[i] = item;
         i
-    }
-    fn remove(&mut self, i: usize) {
-        if i >= BUCKET_SIZE {
-            println!(
-                "free list too long. node at {} with radius{}",
-                self.pos, self.rad
-            );
-        }
-        self.nitems -= 1;
-        self.free_list[self.nitems] = i;
     }
 }
 
-impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
-    pub fn new(pos: Vec2, rad: f32) -> Self {
-        let root_data = D::new(Some(idx::<Node<T, D>>(0)));
-        let root_node = Node::new(pos, rad, None, Some(idx::<D>(0)));
-        let data = vec![root_data];
-        let nodes = vec![root_node];
-        let free_list = Vec::<Idx<Node<T, D>>>::new();
-        let root = idx::<Node<T, D>>(0usize);
+impl<T, D: Clone> std::clone::Clone for Node<T, D> {
+    fn clone(&self) -> Self {
         Self {
-            data,
-            nodes,
-            free_list,
-            root,
+            is_leaf: self.is_leaf,
+
+            pos: self.pos,
+            data: self.data.clone(),
+
+            nitems: self.nitems,
+            items: self.items,
+
+            children: self.children,
         }
+    }
+}
+
+impl<T: QTreeItem, D: QTreeData<T, D> + Clone> QuadTree<T, D> {
+    pub fn new(pos: Vec2, rad: f32) -> Self {
+        let root_node = Node::new(pos);
+        let nodes = vec![root_node];
+        let root = idx::<Node<T, D>>(0usize);
+        Self { nodes, root, rad }
     }
 
     pub fn get_pos(&self) -> Vec2 {
@@ -118,48 +97,38 @@ impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
     }
 
     pub fn get_rad(&self) -> f32 {
-        self.nodes[self.root].rad
+        self.rad
     }
 
-    fn descend(&mut self, node_index: Idx<Node<T, D>>, item_pos: Vec2) -> Idx<Node<T, D>> {
-        let new_index;
+    pub fn clear(&mut self) {
+        let root_node = Node::new(self.nodes[self.root].pos);
+        self.nodes.clear();
+        self.nodes.push(root_node);
+    }
+
+    fn descend(
+        &mut self,
+        rad: f32,
+        node_index: Idx<Node<T, D>>,
+        item_pos: Vec2,
+    ) -> Idx<Node<T, D>> {
         // find quadrant
         let node_pos = self.nodes[node_index].pos;
-        let quadrant = if item_pos.x < node_pos.x {
-            if item_pos.y < node_pos.y { 0 } else { 1 }
-        } else {
-            if item_pos.y < node_pos.y { 2 } else { 3 }
-        };
-        if let Some(child) = self.nodes[node_index].children[quadrant] {
-            new_index = child;
+        let quadrant =
+            ((item_pos.x > node_pos.x) as usize) << 1 | (item_pos.y > node_pos.y) as usize;
+        let child = self.nodes[node_index].children[quadrant];
+        if !child.is_zero() {
+            child
         } else {
             // create leaf node
-            let node_rad = self.nodes[node_index].rad;
+            let new_node_pos = node_pos + 0.5 * rad * CORNERS[quadrant];
+            let new_node = Node::<T, D>::new(new_node_pos);
 
-            let new_node_pos = node_pos + 0.5 * node_rad * CORNERS[quadrant];
-            let new_node_rad = 0.5 * node_rad;
-
-            let new_node = Node::<T, D>::new(new_node_pos, new_node_rad, Some(node_index), None);
-
-            if !self.free_list.is_empty() {
-                new_index = self.free_list.pop().unwrap();
-                let new_node_data = D::new(Some(new_index));
-                let dataidx = Some(idx::<D>(new_index.as_usize()));
-                self.nodes[new_index] = new_node;
-                self.nodes[new_index].data = dataidx;
-                self.data[new_index.as_usize()] = new_node_data;
-            } else {
-                new_index = idx::<Node<T, D>>(self.nodes.len());
-                let new_node_data = D::new(Some(new_index));
-                let dataidx = Some(idx::<D>(new_index.as_usize()));
-                self.nodes.push(new_node);
-                self.nodes[new_index].data = dataidx;
-                self.data.push(new_node_data);
-            }
-            self.nodes[node_index].children[quadrant] = Some(new_index);
-            self.nodes[node_index].child_count += 1;
+            let new_index = idx::<Node<T, D>>(self.nodes.len());
+            self.nodes.push(new_node);
+            self.nodes[node_index].children[quadrant] = new_index;
+            new_index
         }
-        new_index
     }
 
     pub fn insert_item(
@@ -173,45 +142,38 @@ impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
 
         let mut node_index = match node_index {
             Some(x) => x,
-            None => self.root,
+            None => {
+                if (item_pos - self.get_pos()).length() > self.rad {
+                    return;
+                }
+                self.root
+            }
         };
 
+        let mut rad = self.rad;
         loop {
             let is_leaf = self.nodes[node_index].is_leaf;
             if is_leaf {
-                let len = self.nodes[node_index].len;
+                let len = self.nodes[node_index].nitems;
                 if len < BUCKET_SIZE {
                     // add item to bucket
-                    self.nodes[node_index].len += 1;
-                    self.data[self.nodes[node_index].data.unwrap()].update_mass(items, index, 1.0);
-                    let i = self.nodes[node_index].insert(index);
-                    items[index].set_index(i);
-                    items[index].set_parent(Some(node_index));
+                    self.nodes[node_index].insert(index);
                     break;
                 } else {
                     // split
                     self.nodes[node_index].is_leaf = false;
+                    //self.nodes[node_index].nitems = 0;
                     for i in 0..BUCKET_SIZE {
-                        let Some(item_idx) = self.nodes[node_index].items[i] else {
-                            continue;
-                        };
+                        let item_idx = self.nodes[node_index].items[i];
                         let item_pos = items[item_idx].get_pos();
-                        let child_idx = self.descend(node_index, item_pos);
-                        self.nodes[node_index].remove(i);
-
-                        self.nodes[child_idx].len += 1;
-                        self.data[self.nodes[child_idx].data.unwrap()]
-                            .update_mass(items, index, 1.0);
-                        let j = self.nodes[child_idx].insert(item_idx);
-                        items[item_idx].set_index(j);
-                        items[item_idx].set_parent(Some(child_idx));
+                        let child_idx = self.descend(rad, node_index, item_pos);
+                        self.nodes[child_idx].insert(item_idx);
                     }
                 }
             }
             if !is_leaf {
-                self.nodes[node_index].len += 1;
-                self.data[self.nodes[node_index].data.unwrap()].update_mass(items, index, 1.0);
-                node_index = self.descend(node_index, item_pos);
+                node_index = self.descend(rad, node_index, item_pos);
+                rad *= 0.5;
             }
         }
     }
@@ -223,10 +185,8 @@ impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
         loop {
             let is_leaf = self.nodes[node_index].is_leaf;
             if is_leaf {
-                for i in 0..BUCKET_SIZE {
-                    let Some(idx) = self.nodes[node_index].items[i] else {
-                        continue;
-                    };
+                for i in 0..self.nodes[node_index].nitems {
+                    let idx = self.nodes[node_index].items[i];
                     if items[idx].get_pos() == pos {
                         x = Some(idx);
                     }
@@ -240,7 +200,8 @@ impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
                 } else {
                     if pos.y < node_pos.y { 2 } else { 3 }
                 };
-                if let Some(child) = self.nodes[node_index].children[quadrant] {
+                let child = self.nodes[node_index].children[quadrant];
+                if !child.is_zero() {
                     node_index = child;
                 } else {
                     break;
@@ -250,104 +211,29 @@ impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
         x
     }
 
-    fn is_inside(&self, node_index: Idx<Node<T, D>>, pos: Vec2) -> bool {
-        (self.nodes[node_index].pos - pos).abs().max_element() <= self.nodes[node_index].rad
-    }
-
-    pub fn update_item(&mut self, items: &mut [T], index: usize) {
-        let index = idx::<T>(index);
-        let Some(mut parent_index) = items[index].get_parent() else {
-            // no parent
-            return;
-        };
-        let pos = items[index].get_pos();
-        // skip if item is still within parent
-        if self.is_inside(parent_index, pos) {
-            return;
-        }
-        // ascend until inside grandparent
-        for iteration in 0.. {
-            self.nodes[parent_index].len -= 1;
-            self.data[self.nodes[parent_index].data.unwrap()].update_mass(items, index, -1.0);
-            if self.is_inside(parent_index, pos) {
-                break;
-            }
-            let grandparent_option = self.nodes[parent_index].parent;
-            if self.nodes[parent_index].is_leaf {
-                // first leaf: remove item
-                if iteration == 0 {
-                    let i = items[index].get_index();
-                    self.nodes[parent_index].remove(i);
-                }
-                if self.nodes[parent_index].len == 0 {
-                    if let Some(grandparent_index) = grandparent_option {
-                        self.free_list.push(parent_index);
-                        for i in 0..4 {
-                            if self.nodes[grandparent_index].children[i] == Some(parent_index) {
-                                self.nodes[grandparent_index].children[i] = None;
-                                self.nodes[grandparent_index].child_count -= 1;
-                                if self.nodes[grandparent_index].child_count == 0 {
-                                    self.nodes[grandparent_index].is_leaf = true;
-                                }
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if let Some(grandparent_index) = grandparent_option {
-                parent_index = grandparent_index;
-            } else {
-                break;
-            }
-        }
-        // insert item
-        self.insert_item(Some(parent_index), items, index.as_usize());
-    }
-
     pub fn update_bottom_up(&mut self, items: &[T]) {
-        /*
-        let mut done = vec![false; self.nodes.len()];
-        for (i, leaf) in self.nodes.iter().filter(|x| x.is_leaf).enumerate() {
-            D::update_pos(&mut self.data, leaf.data.unwrap(), &self.nodes, items);
-            done[i] = true;
-            let mut j = leaf.parent.unwrap().as_usize();
-            while !done[j] {
-                D::update_pos(
-                    &mut self.data,
-                    self.nodes[leaf.parent.unwrap()].data.unwrap(),
-                    &self.nodes,
-                    items,
-                );
-                done[j] = true;
-                j = self.nodes[leaf.parent.unwrap()].parent.unwrap().as_usize();
+        for i in (0..self.nodes.len()).rev() {
+            let i = idx::<Node<T, D>>(i);
+            let node = &mut self.nodes[i];
+            if node.is_leaf {
+                D::update_leaf(i, &mut self.nodes, items);
+            } else {
+                D::update_internal(i, &mut self.nodes);
             }
         }
-        */
-
-        struct Update<'s, D> {
-            f: &'s dyn Fn(&Update<D>, usize, &mut Vec<D>),
-        }
-        let update = Update::<D> {
-            f: &|update, node: usize, data: &mut Vec<D>| {
-                for child in self.nodes[node].children.iter().flatten() {
-                    (update.f)(update, child.as_usize(), data);
-                }
-                D::update_pos(data, self.nodes[node].data.unwrap(), &self.nodes, items);
-            },
-        };
-        (update.f)(&update, self.root.as_usize(), &mut self.data);
     }
 
-    fn div(&self, lines: &mut Vec<[Vec2; 2]>, node_index: Idx<Node<T, D>>) {
+    fn div(&self, r: f32, lines: &mut Vec<[Vec2; 2]>, node_index: Idx<Node<T, D>>) {
         let p = self.nodes[node_index].pos;
-        let r = self.nodes[node_index].rad;
         lines.push([p + r * UP, p + r * DOWN]);
         lines.push([p + r * LEFT, p + r * RIGHT]);
-        for i in self.nodes[node_index].children.into_iter().flatten() {
+        for i in self.nodes[node_index]
+            .children
+            .into_iter()
+            .filter(|x| !x.is_zero())
+        {
             if !self.nodes[i].is_leaf {
-                self.div(lines, i);
+                self.div(0.5 * r, lines, i);
             }
         }
     }
@@ -363,7 +249,7 @@ impl<T: QTreeItem<T, D>, D: QTreeData<T, D>> QuadTree<T, D> {
         lines.push([p + r * BOTTOM_LEFT, p + r * TOP_LEFT]);
         // divisions
         if !self.nodes[self.root].is_leaf {
-            self.div(&mut lines, self.root);
+            self.div(r, &mut lines, self.root);
         }
         lines
     }

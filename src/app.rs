@@ -1,6 +1,12 @@
 use crate::draw::*;
 use crate::gui::EguiRenderer;
 use crate::sim::Sim;
+use egui::{
+    CollapsingHeader,
+    collapsing_header::CollapsingState,
+    style::HandleShape,
+    widgets::{Slider, SliderClamping, SliderOrientation},
+};
 use egui_wgpu::{ScreenDescriptor, wgpu};
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,7 +16,7 @@ use winit::{
     dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
-    //keyboard::{KeyCode, PhysicalKey},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -19,6 +25,7 @@ const FPS_INTERVAL_MS: u128 = 500;
 struct AppState {
     pub sim: Sim,
     pub draw2d: Draw2D,
+    pub leftpanel: bool,
 
     pub paused: bool,
     pub fps: f32,
@@ -99,6 +106,7 @@ impl AppState {
             sim,
             draw2d,
 
+            leftpanel: true,
             paused: false,
             fps: 0.0,
             time,
@@ -266,7 +274,7 @@ impl App {
             }
             /*
              */
-            if state.draw2d.debug && state.draw2d.debug_vertex_count > 0 {
+            if state.draw2d.render_settings.debug && state.draw2d.debug_vertex_count > 0 {
                 pass.set_pipeline(&state.draw2d.debug_pipeline);
                 pass.set_bind_group(0, &state.draw2d.bind_group, &[]);
                 pass.set_vertex_buffer(0, state.draw2d.debug_vbo.slice(..));
@@ -278,49 +286,120 @@ impl App {
         {
             state.egui_renderer.begin_frame(window);
 
-            egui::Window::new("spaghetti!")
-                .resizable(false)
-                .vscroll(false)
-                .default_open(true)
-                .show(state.egui_renderer.context(), |ui| {
-                    let delta_t = state.time.elapsed().as_millis();
-                    if delta_t >= FPS_INTERVAL_MS {
-                        let i = state.sim.snapshot.iterations;
-                        let n = i - state.iterations;
-                        state.fps = 1000.0 * n as f32 / delta_t as f32;
-                        state.iterations = i;
-                        state.time = Instant::now();
-                    }
-                    ui.label(format!("fps: {}", state.fps));
-                    ui.label(format!("points: {}", state.sim.snapshot.points.len()));
-                    ui.label(format!("edges: {}", state.sim.snapshot.edges.len()));
-
-                    ui.label(format!("edge instances: {}", state.draw2d.instance_count));
-
-                    let label = if state.paused { "Resume" } else { "Pause" };
-                    if ui.button(label).clicked() {
-                        if state.paused {
-                            state.sim.resume();
-                        } else {
-                            state.sim.pause();
-                        }
-                        state.paused = !state.paused;
-                    }
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Pixels per point: {}",
-                            state.egui_renderer.context().pixels_per_point()
-                        ));
-                        if ui.button("-").clicked() {
-                            state.scale_factor = (state.scale_factor - 0.1).max(0.3);
-                        }
-                        if ui.button("+").clicked() {
-                            state.scale_factor = (state.scale_factor + 0.1).min(3.0);
-                        }
+            egui::CentralPanel::no_frame().show(state.egui_renderer.context(), |ui| {
+                egui::Panel::top(egui::Id::new("top_panel"))
+                    .resizable(false)
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.toggle_value(&mut state.leftpanel, "⬅");
+                            if ui.button("↺").on_hover_text("Reset [R]").clicked() {
+                                state.sim.reset();
+                            }
+                            if ui
+                                .button(if state.paused { "⏵" } else { "⏸" })
+                                .on_hover_text(if state.paused {
+                                    "Run [Space]"
+                                } else {
+                                    "Pause [Space]"
+                                })
+                                .clicked()
+                            {
+                                if state.paused {
+                                    state.sim.resume();
+                                } else {
+                                    state.sim.pause();
+                                }
+                                state.paused = !state.paused;
+                            }
+                        });
                     });
-                });
+                egui::Panel::left(egui::Id::new("left_panel"))
+                    .resizable(true)
+                    .default_size(250.0)
+                    .size_range(100.0..=500.0)
+                    .show_animated_inside(ui, state.leftpanel, |ui| {
+                        CollapsingHeader::new("Simulation")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    Slider::new(
+                                        &mut state.sim.sim_settings.damping,
+                                        (0.1)..=(10.0),
+                                    )
+                                    .logarithmic(true)
+                                    .clamping(SliderClamping::Never)
+                                    .smart_aim(true)
+                                    .text("Damping")
+                                    .trailing_fill(true)
+                                    .handle_shape(HandleShape::Rect { aspect_ratio: 0.5 }),
+                                );
+                            });
+                        CollapsingHeader::new("Graphics")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                CollapsingHeader::new("UI")
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!(
+                                                "Pixels per point: {}",
+                                                state.egui_renderer.context().pixels_per_point()
+                                            ));
+                                            if ui.button("-").clicked() {
+                                                state.scale_factor =
+                                                    (state.scale_factor - 0.1).max(0.3);
+                                            }
+                                            if ui.button("+").clicked() {
+                                                state.scale_factor =
+                                                    (state.scale_factor + 0.1).min(3.0);
+                                            }
+                                        });
+                                    });
+
+                                CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    ui.make_persistent_id("DebugSettings"),
+                                    false,
+                                )
+                                .show_header(ui, |ui| {
+                                    ui.checkbox(&mut state.draw2d.render_settings.debug, "Debug");
+                                })
+                                .body(|ui| {
+                                    ui.add_enabled_ui(state.draw2d.render_settings.debug, |ui| {
+                                        ui.checkbox(
+                                            &mut state.draw2d.render_settings.quadtree,
+                                            "QuadTree",
+                                        );
+                                        ui.checkbox(
+                                            &mut state.draw2d.render_settings.mass_circles,
+                                            "Mass Circles",
+                                        );
+                                    })
+                                });
+                            });
+
+                        CollapsingHeader::new("Stats")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let delta_t = state.time.elapsed().as_millis();
+                                if delta_t >= FPS_INTERVAL_MS {
+                                    let i = state.sim.snapshot.iterations;
+                                    let n = i - state.iterations;
+                                    state.fps = 1000.0 * n as f32 / delta_t as f32;
+                                    state.iterations = i;
+                                    state.time = Instant::now();
+                                }
+
+                                ui.label(format!("fps: {}", state.fps));
+                                ui.label(format!("points: {}", state.sim.snapshot.points.len()));
+                                ui.label(format!("edges: {}", state.sim.snapshot.edges.len()));
+                            });
+                        ui.add(egui::Separator::default().grow(8.0));
+                        ui.vertical_centered(|ui| {
+                            ui.label("Left Panel");
+                        });
+                    });
+            });
 
             state.egui_renderer.end_frame_and_draw(
                 &state.device,
@@ -363,6 +442,32 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.handle_redraw();
                 self.window.as_ref().unwrap().request_redraw();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && event.state.is_pressed()
+                    && !event.repeat
+                {
+                    match code {
+                        KeyCode::Space => {
+                            let state = self.state.as_mut().unwrap();
+                            if state.paused {
+                                state.sim.resume();
+                            } else {
+                                state.sim.pause();
+                            }
+                            state.paused = !state.paused;
+                        }
+                        KeyCode::KeyR => {
+                            self.state.as_mut().unwrap().sim.reset();
+                        }
+                        KeyCode::Escape => {
+                            self.state.as_mut().unwrap().sim.kill();
+                            event_loop.exit();
+                        }
+                        _ => (),
+                    }
+                }
             }
             _ => (),
         }

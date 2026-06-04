@@ -32,12 +32,13 @@ pub struct EdgeInstance {
 pub struct CircleInstance {
     pub center: [f32; 2],
     pub radius: f32,
-    pub _pad: f32,
     pub color: [f32; 4],
 }
 
 #[derive(Debug)]
 pub struct Draw2D {
+    pub render_settings: RenderSettings,
+
     pub globals_ubo: wgpu::Buffer,
     pub bind_group: wgpu::BindGroup,
 
@@ -50,10 +51,16 @@ pub struct Draw2D {
     pub circle_instance_buf: wgpu::Buffer,
     pub circle_instance_count: u32,
 
-    pub debug: bool,
     pub debug_vbo: wgpu::Buffer,
     pub debug_vertex_count: u32,
     pub debug_pipeline: wgpu::RenderPipeline,
+}
+
+#[derive(Debug)]
+pub struct RenderSettings {
+    pub debug: bool,
+    pub quadtree: bool,
+    pub mass_circles: bool,
 }
 
 impl Draw2D {
@@ -63,6 +70,12 @@ impl Draw2D {
         surface_format: wgpu::TextureFormat,
         snapshot: &Snapshot,
     ) -> Self {
+        let render_settings = RenderSettings {
+            debug: true,
+            quadtree: true,
+            mass_circles: true,
+        };
+
         const QUAD_VERTS: &[[f32; 2]] = &[
             [0.0, 0.0],
             [1.0, 0.0],
@@ -74,7 +87,7 @@ impl Draw2D {
 
         // buffers
         let instances = build_edge_instances(snapshot);
-        let circle_instances = build_circle_instances(snapshot);
+        let circle_instances = Vec::<CircleInstance>::new();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Edge Instance Buffer"),
             contents: bytemuck::cast_slice(&instances),
@@ -273,6 +286,8 @@ impl Draw2D {
         );
 
         Self {
+            render_settings,
+
             globals_ubo,
             bind_group,
 
@@ -285,7 +300,6 @@ impl Draw2D {
             circle_instance_buf,
             circle_instance_count,
 
-            debug: true,
             debug_vbo,
             debug_vertex_count: 0,
             debug_pipeline,
@@ -310,7 +324,11 @@ impl Draw2D {
             });
         }
 
-        let circle_instances = build_circle_instances(snapshot);
+        let mut circle_instances = Vec::<CircleInstance>::new();
+        if self.render_settings.debug && self.render_settings.mass_circles {
+            circle_instances.extend(build_mass_circles(snapshot));
+        }
+
         let circle_count = circle_instances.len() as u32;
         if circle_count == self.circle_instance_count {
             queue.write_buffer(
@@ -328,8 +346,12 @@ impl Draw2D {
                 });
         }
 
-        if self.debug {
-            let vertices = build_debug_vertices(snapshot);
+        if self.render_settings.debug {
+            let mut vertices = Vec::<GpuVertex>::new();
+            if self.render_settings.quadtree {
+                vertices.extend(build_debug_tree(snapshot));
+            }
+
             self.debug_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Debug VBO"),
                 contents: if vertices.is_empty() {
@@ -342,14 +364,13 @@ impl Draw2D {
                 },
                 usage: wgpu::BufferUsages::VERTEX,
             });
-
             self.debug_vertex_count = vertices.len() as u32;
         }
     }
 }
 
 fn build_edge_instances(snapshot: &Snapshot) -> Vec<EdgeInstance> {
-    let color = [0.2, 0.2, 0.8, 1.0f32];
+    let color = [0.1, 0.3, 0.8, 1.0f32];
 
     snapshot
         .edges
@@ -367,34 +388,27 @@ fn build_edge_instances(snapshot: &Snapshot) -> Vec<EdgeInstance> {
         .collect()
 }
 
-fn build_circle_instances(snapshot: &Snapshot) -> Vec<CircleInstance> {
+fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
     if let Some(tree) = &snapshot.tree {
         let mut points = Vec::<CircleInstance>::new();
         for node in tree.nodes.iter() {
-            if let Some(idx) = node.data {
-                let nodedata = &tree.data[idx];
-                points.push(CircleInstance {
-                    center: [nodedata.sum_all.pos.x, nodedata.sum_all.pos.y],
-                    //center: [node.pos.x, node.pos.y],
-                    //radius: 0.3 * nodedata.sum_all.mass.sqrt(),
-                    radius: (node.len as f32).sqrt(),
-                    _pad: 0.0,
-                    color: [0.9, 0.4, 0.1, 0.10],
-                })
-            }
+            points.push(CircleInstance {
+                center: [node.data.all.pos.x, node.data.all.pos.y],
+                radius: 1.5 * node.data.all.radius.sqrt(),
+                color: [0.8, 0.2, 0.1, 0.15],
+            });
         }
         points
     } else {
         vec![CircleInstance {
             center: [0.0, 0.0],
             radius: 0.0,
-            _pad: 0.0,
             color: [0.0, 0.0, 0.0, 0.0],
         }]
     }
 }
 
-fn build_debug_vertices(snapshot: &Snapshot) -> Vec<GpuVertex> {
+fn build_debug_tree(snapshot: &Snapshot) -> Vec<GpuVertex> {
     let color = [0.5, 0.5, 0.5, 0.2];
     if let Some(tree) = &snapshot.tree {
         tree.get_viz()

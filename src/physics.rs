@@ -1,20 +1,15 @@
 use crate::tree::{Node, QTreeData, QTreeItem};
 use crate::typed_idx::*;
-use ::itertools::Itertools;
 use glam::Vec2;
 use std::cmp::PartialEq;
-use std::collections::HashMap;
 
-const N_SORTED: usize = 8;
 const MERGE_RADIUS: f32 = 0.000005;
 
 #[derive(Debug, Clone)]
 pub struct Point {
     pub pos: Vec2,
-    pub mass: f32,
-    pub parent: Option<Idx<Node<Self, PointNodeData>>>,
+    pub radius: f32,
     pub net: usize,
-    pub index: usize,
     pub v: Vec2,
     pub f: Vec2,
     pub neighbors: u32,
@@ -23,17 +18,12 @@ pub struct Point {
 #[derive(Debug, Clone, Copy)]
 pub struct VirtualPoint {
     pub pos: Vec2,
-    pub other_pos: Vec2,
-    pub mass: f32,
-    pub net: usize,
+    pub radius: f32,
 }
 
 #[derive(Debug, Clone)]
 pub struct PointNodeData {
-    pub node: Option<Idx<Node<Point, PointNodeData>>>,
-    pub sum_all: VirtualPoint,
-    pub virtual_points: Vec<VirtualPoint>,
-    pub net_table: HashMap<usize, usize>,
+    pub all: VirtualPoint,
 }
 
 #[derive(Debug, Clone)]
@@ -45,18 +35,11 @@ pub struct Edge {
 }
 
 impl Point {
-    pub fn new(
-        v: Vec2,
-        m: f32,
-        parent: Option<Idx<Node<Self, PointNodeData>>>,
-        net: usize,
-    ) -> Self {
+    pub fn new(v: Vec2, m: f32, net: usize) -> Self {
         Self {
             pos: v,
-            mass: m,
-            parent,
+            radius: m,
             net,
-            index: 0,
             v: Vec2::ZERO,
             f: Vec2::ZERO,
             neighbors: 0,
@@ -75,158 +58,13 @@ impl Point {
 }
 
 impl PointNodeData {
-    fn new(node: Option<Idx<Node<Point, PointNodeData>>>) -> Self {
+    fn new() -> Self {
         Self {
-            node,
-            sum_all: VirtualPoint{
+            all: VirtualPoint {
                 pos: Vec2::ZERO,
-                other_pos: Vec2::ZERO,
-                mass: 0.0,
-                net: 0usize,
+                radius: 0.0,
             },
-            virtual_points: Vec::<VirtualPoint>::new(),
-            net_table: HashMap::<usize, usize>::new(),
         }
-    }
-
-    fn update_pos(
-        data: &mut [PointNodeData],
-        idx: Idx<PointNodeData>,
-        nodes: &[Node<Point, PointNodeData>],
-        items: &[Point],
-    ) {
-        // calculate center of mass
-        if nodes[data[idx].node.unwrap()].is_leaf {
-            for i in 0..data[idx].net_table.len() {
-                let net = data[idx].virtual_points[i].net;
-                data[idx].virtual_points[i].pos = nodes[data[idx].node.unwrap()]
-                    .items
-                    .into_iter()
-                    .flatten()
-                    .filter(|x| items[*x].net == net)
-                    .fold(Vec2::ZERO, |acc, x| acc + items[x].pos * items[x].mass)
-                    / data[idx].virtual_points[i].mass;
-            }
-        } else {
-            for i in 0..data[idx].net_table.len() {
-                let net = data[idx].virtual_points[i].net;
-                data[idx].virtual_points[i].pos = nodes[data[idx].node.unwrap()]
-                    .children
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|child| {
-                        let child_data = &data[nodes[child].data.unwrap()];
-                        child_data.net_table.get(&net).map(|i| (child_data, i))
-                    })
-                    .fold(Vec2::ZERO, {
-                        |acc, (child_data, i)| {
-                            acc + child_data.virtual_points[*i].pos * child_data.virtual_points[*i].mass
-                        }
-                    })
-                    / data[idx].virtual_points[i].mass;
-            }
-        }
-        let total_mass = data[idx].sum_all.mass;
-        let weighed_sum = data[idx]
-            .virtual_points
-            .iter()
-            .fold(Vec2::ZERO, |acc, x| acc + x.pos * x.mass);
-        if data[idx].net_table.len() > 1 {
-            for i in 0..data[idx].net_table.len() {
-                let local_mass = data[idx].virtual_points[i].mass;
-                data[idx].virtual_points[i].other_pos =
-                    (weighed_sum - data[idx].virtual_points[i].pos * local_mass)
-                    / (total_mass - local_mass);
-            }
-        }
-        data[idx].sum_all.pos = weighed_sum / total_mass;
-    }
-
-    fn update_mass(&mut self, items: &[Point], item: Idx<Point>, delta_mass: f32) {
-        // update total mass
-        let net = items[item].net;
-
-        self.sum_all.mass += delta_mass;
-        if let Some(i) = self.net_table.get(&net) {
-            // net already exists
-            let mut i = *i;
-            // update total mass
-            let new_mass = self.virtual_points[i].mass + delta_mass;
-            self.virtual_points[i].mass = new_mass;
-
-            let last = self.virtual_points.len() - 1;
-            let last_sorted = last.min(N_SORTED);
-            if new_mass > self.virtual_points[last_sorted].mass {
-                if delta_mass > 0.0 {
-                    // upward bubble sort
-                    while i > 0 {
-                        if new_mass > self.virtual_points[i - 1].mass {
-                            let other_point = self.virtual_points[i - 1];
-                            // swap nets
-                            self.net_table.insert(net, i - 1);
-                            self.net_table.insert(other_point.net, i);
-                            // swap points
-                            self.virtual_points[i - 1] = self.virtual_points[i];
-                            self.virtual_points[i] = other_point;
-                            // repeat upward
-                            i -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                } else {
-                    // downward bubble sort
-                    while i < last_sorted {
-                        if new_mass < self.virtual_points[i + 1].mass {
-                            let other_point = self.virtual_points[i + 1];
-                            // swap nets
-                            self.net_table.insert(net, i + 1);
-                            self.net_table.insert(other_point.net, i);
-                            // swap points
-                            self.virtual_points[i + 1] = self.virtual_points[i];
-                            self.virtual_points[i] = other_point;
-                            // repeat downward
-                            i += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            // add net
-            let idx =
-            if !self.virtual_points.is_empty() {
-                let last = self.virtual_points.len() - 1;
-                let last_sorted = last.min(N_SORTED);
-                self.virtual_points[0..last_sorted].partition_point(|x| x.mass > delta_mass)
-            } else {
-                self.sum_all.pos = items[item].pos;
-                0
-            };
-            if idx < N_SORTED {
-                self.virtual_points.insert(
-                    idx,
-                    VirtualPoint{
-                        pos: items[item].pos,
-                        other_pos: self.sum_all.pos,
-                        mass: delta_mass,
-                        net
-                    });
-                for i in idx..self.virtual_points.len() {
-                    self.net_table.insert(self.virtual_points[i].net, i);
-                }
-            } else {
-                self.virtual_points.push(
-                    VirtualPoint{
-                        pos: items[item].pos,
-                        other_pos: self.sum_all.pos,
-                        mass: delta_mass,
-                        net
-                });
-                self.net_table.insert(net, self.virtual_points.len()-1);
-            }
-        };
     }
 }
 
@@ -243,38 +81,50 @@ impl Edge {
 }
 
 impl QTreeData<Point, PointNodeData> for PointNodeData {
-    fn new(node: Option<Idx<Node<Point, PointNodeData>>>) -> Self {PointNodeData::new(node)}
-    fn set_node(&mut self, node: Option<Idx<Node<Point, PointNodeData>>>) {
-        self.node = node;
+    fn new() -> Self {
+        PointNodeData::new()
     }
-    fn update_pos(
-        data: &mut [PointNodeData],
-        idx: Idx<PointNodeData>,
-        nodes: &[Node<Point, PointNodeData>],
-        items: &[Point]
-        ) {
-        Self::update_pos(data, idx, nodes, items);
+
+    fn update_leaf(
+        self_idx: Idx<Node<Point, PointNodeData>>,
+        nodes: &mut [Node<Point, PointNodeData>],
+        items: &[Point],
+    ) {
+        let nitems = nodes[self_idx].nitems;
+        nodes[self_idx].data.all.radius = nodes[self_idx].items[0..nitems]
+            .iter()
+            .map(|x| items[*x].radius)
+            .sum::<f32>();
+        nodes[self_idx].data.all.pos = nodes[self_idx].items[0..nitems]
+            .iter()
+            .map(|x| items[*x].pos * items[*x].radius)
+            .sum::<Vec2>()
+            / nodes[self_idx].data.all.radius;
     }
-    fn update_mass(&mut self, items: &[Point], item: Idx<Point>, mass: f32) {
-        self.update_mass(items, item, mass);
+
+    fn update_internal(
+        self_idx: Idx<Node<Point, PointNodeData>>,
+        nodes: &mut [Node<Point, PointNodeData>],
+    ) {
+        nodes[self_idx].data.all.radius = nodes[self_idx]
+            .children
+            .iter()
+            .filter(|x| x.as_usize() != 0usize)
+            .map(|x| nodes[*x].data.all.radius)
+            .sum::<f32>();
+        nodes[self_idx].data.all.pos = nodes[self_idx]
+            .children
+            .iter()
+            .filter(|x| x.as_usize() != 0usize)
+            .map(|x| nodes[*x].data.all.pos * nodes[*x].data.all.radius)
+            .sum::<Vec2>()
+            / nodes[self_idx].data.all.radius;
     }
 }
 
-impl QTreeItem<Point, PointNodeData> for Point {
+impl QTreeItem for Point {
     fn get_pos(&self) -> Vec2 {
         self.pos
-    }
-    fn set_parent(&mut self, parent: Option<Idx<Node<Self, PointNodeData>>>) {
-        self.parent = parent;
-    }
-    fn get_parent(&self) -> Option<Idx<Node<Self, PointNodeData>>> {
-        self.parent
-    }
-    fn set_index(&mut self, index: usize) {
-        self.index = index;
-    }
-    fn get_index(&self) -> usize {
-        self.index
     }
 }
 impl PartialEq for Point {
@@ -289,11 +139,11 @@ macro_rules! vec2 {
     };
 }
 macro_rules! point {
-    ($x:expr, $y:expr, $m:expr, $p:expr, $n:expr) => {
-        Point::new(vec2![$x, $y], $m, $p, $n)
+    ($x:expr, $y:expr, $r:expr, $n:expr) => {
+        Point::new(vec2![$x, $y], $r, $n)
     };
-    ($v:expr, $m:expr, $p:expr, $n:expr) => {
-        Point::new($v, $m, $p, $n)
+    ($v:expr, $r:expr, $n:expr) => {
+        Point::new($v, $r, $n)
     };
 }
 macro_rules! edge {
