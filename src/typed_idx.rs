@@ -52,6 +52,8 @@ impl<T> IndexMut<Idx<T>> for Vec<T> {
     }
 }
 impl<T> Idx<T> {
+    pub const ZERO: Idx<T> = Idx::<T>(0usize, PhantomData::<T>);
+    pub const ONE: Idx<T> = Idx::<T>(1usize, PhantomData::<T>);
     pub fn as_usize(&self) -> usize {
         self.0
     }

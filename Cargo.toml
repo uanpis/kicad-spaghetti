@@ -30,6 +30,7 @@ profiling = "1.0.18"
 tracy-client = "0.18.4"
 
 [features]
+mark = []
 # Keep profiling opt-in so it doesn't affect release builds by default
 profile = [
     "profiling/profile-with-tracy",

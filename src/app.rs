@@ -5,7 +5,7 @@ use egui::{
     CollapsingHeader,
     collapsing_header::CollapsingState,
     style::HandleShape,
-    widgets::{Slider, SliderClamping, SliderOrientation},
+    widgets::{Slider, SliderClamping},
 };
 use egui_wgpu::{ScreenDescriptor, wgpu};
 use std::sync::Arc;
@@ -286,6 +286,7 @@ impl App {
         {
             state.egui_renderer.begin_frame(window);
 
+            #[allow(deprecated)]
             egui::CentralPanel::no_frame().show(state.egui_renderer.context(), |ui| {
                 egui::Panel::top(egui::Id::new("top_panel"))
                     .resizable(false)
@@ -321,18 +322,83 @@ impl App {
                         CollapsingHeader::new("Simulation")
                             .default_open(true)
                             .show(ui, |ui| {
-                                ui.add(
-                                    Slider::new(
-                                        &mut state.sim.sim_settings.damping,
-                                        (0.1)..=(10.0),
+                                if ui
+                                    .add(
+                                        Slider::new(
+                                            &mut state.sim.sim_settings.damping,
+                                            0.1..=10.0,
+                                        )
+                                        .logarithmic(true)
+                                        .clamping(SliderClamping::Never)
+                                        .smart_aim(true)
+                                        .text("Damping")
+                                        .trailing_fill(true)
+                                        .handle_shape(HandleShape::Rect { aspect_ratio: 0.5 }),
                                     )
-                                    .logarithmic(true)
-                                    .clamping(SliderClamping::Never)
-                                    .smart_aim(true)
-                                    .text("Damping")
-                                    .trailing_fill(true)
-                                    .handle_shape(HandleShape::Rect { aspect_ratio: 0.5 }),
-                                );
+                                    //TODO implement
+                                    .on_hover_text("This does nothing for now (:")
+                                    .changed()
+                                    || ui
+                                        .add(
+                                            Slider::new(
+                                                &mut state.sim.sim_settings.noodliness,
+                                                0.0..=1.0,
+                                            )
+                                            .logarithmic(false)
+                                            .clamping(SliderClamping::Never)
+                                            .smart_aim(true)
+                                            .text("Noodliness")
+                                            .trailing_fill(true)
+                                            .handle_shape(HandleShape::Rect { aspect_ratio: 0.5 }),
+                                        )
+                                        .on_hover_text("Repulsive force / tension ratio")
+                                        .changed()
+                                    || if let Some(c) = CollapsingHeader::new("Advanced")
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            ui.add(
+                                                Slider::new(
+                                                    &mut state
+                                                        .sim
+                                                        .sim_settings
+                                                        .collision_elasticity,
+                                                    0.0..=1.0,
+                                                )
+                                                .logarithmic(false)
+                                                .clamping(SliderClamping::Never)
+                                                .smart_aim(true)
+                                                .text("Collision Elasticity")
+                                                .trailing_fill(true)
+                                                .handle_shape(HandleShape::Rect {
+                                                    aspect_ratio: 0.5,
+                                                }),
+                                            )
+                                            .on_hover_text("Bounciness of collisions between objects")
+                                            .changed()
+                                                || ui
+                                                    .checkbox(
+                                                        &mut state.sim.sim_settings.limit_step,
+                                                        "Limit step size",
+                                                    )
+                                                    .on_hover_text("Clamp step size to half of the smallest track width")
+                                                    .changed()
+                                                || ui
+                                                    .checkbox(
+                                                        &mut state.sim.sim_settings.self_collision,
+                                                        "Self collision",
+                                                    )
+                                                    .on_hover_text("Enable collisions between objects in the same net")
+                                                    .changed()
+                                        })
+                                        .body_response
+                                    {
+                                        c.changed()
+                                    } else {
+                                        false
+                                    }
+                                {
+                                    state.sim.update_settings();
+                                };
                             });
                         CollapsingHeader::new("Graphics")
                             .default_open(false)
@@ -371,6 +437,10 @@ impl App {
                                             "QuadTree",
                                         );
                                         ui.checkbox(
+                                            &mut state.draw2d.render_settings.nodebounds,
+                                            "Node Bounding Boxes",
+                                        );
+                                        ui.checkbox(
                                             &mut state.draw2d.render_settings.mass_circles,
                                             "Mass Circles",
                                         );
@@ -392,7 +462,8 @@ impl App {
 
                                 ui.label(format!("fps: {}", state.fps));
                                 ui.label(format!("points: {}", state.sim.snapshot.points.len()));
-                                ui.label(format!("edges: {}", state.sim.snapshot.edges.len()));
+                                ui.label(format!("curves: {}", state.sim.snapshot.curves.len()));
+                                ui.label(format!("edges: {}", state.sim.snapshot.curves.iter().flatten().count()));
                             });
                         ui.add(egui::Separator::default().grow(8.0));
                         ui.vertical_centered(|ui| {

@@ -60,6 +60,7 @@ pub struct Draw2D {
 pub struct RenderSettings {
     pub debug: bool,
     pub quadtree: bool,
+    pub nodebounds: bool,
     pub mass_circles: bool,
 }
 
@@ -73,7 +74,8 @@ impl Draw2D {
         let render_settings = RenderSettings {
             debug: true,
             quadtree: true,
-            mass_circles: true,
+            nodebounds: true,
+            mass_circles: false,
         };
 
         const QUAD_VERTS: &[[f32; 2]] = &[
@@ -328,6 +330,7 @@ impl Draw2D {
         if self.render_settings.debug && self.render_settings.mass_circles {
             circle_instances.extend(build_mass_circles(snapshot));
         }
+        circle_instances.extend(build_point_circles(snapshot));
 
         let circle_count = circle_instances.len() as u32;
         if circle_count == self.circle_instance_count {
@@ -352,6 +355,10 @@ impl Draw2D {
                 vertices.extend(build_debug_tree(snapshot));
             }
 
+            if self.render_settings.nodebounds {
+                vertices.extend(build_node_bounds(snapshot));
+            }
+
             self.debug_vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Debug VBO"),
                 contents: if vertices.is_empty() {
@@ -371,11 +378,15 @@ impl Draw2D {
 
 fn build_edge_instances(snapshot: &Snapshot) -> Vec<EdgeInstance> {
     let color = [0.1, 0.3, 0.8, 1.0f32];
+    let color_mark = [0.8, 0.3, 0.1, 1.0f32];
 
     snapshot
-        .edges
+        .curves
         .iter()
+        .flatten()
         .map(|edge| {
+            let color = if edge.mark { color_mark } else { color };
+
             let p0 = snapshot.points[edge.i0].pos;
             let p1 = snapshot.points[edge.i1].pos;
             EdgeInstance {
@@ -388,13 +399,33 @@ fn build_edge_instances(snapshot: &Snapshot) -> Vec<EdgeInstance> {
         .collect()
 }
 
+fn build_point_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
+    let mut points = Vec::<CircleInstance>::new();
+    for point in snapshot.points.iter() {
+        points.push(CircleInstance {
+            center: [point.pos.x, point.pos.y],
+            radius: point.rad,
+            color: [0.8, 0.2, 0.1, 1.0],
+        });
+    }
+    if points.is_empty() {
+        vec![CircleInstance {
+            center: [0.0, 0.0],
+            radius: 0.0,
+            color: [0.0, 0.0, 0.0, 0.0],
+        }]
+    } else {
+        points
+    }
+}
+
 fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
     if let Some(tree) = &snapshot.tree {
         let mut points = Vec::<CircleInstance>::new();
         for node in tree.nodes.iter() {
             points.push(CircleInstance {
-                center: [node.data.all.pos.x, node.data.all.pos.y],
-                radius: 1.5 * node.data.all.radius.sqrt(),
+                center: [node.data.pos.x, node.data.pos.y],
+                radius: 1.5 * node.data.rad.sqrt(),
                 color: [0.8, 0.2, 0.1, 0.15],
             });
         }
@@ -404,6 +435,36 @@ fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
             center: [0.0, 0.0],
             radius: 0.0,
             color: [0.0, 0.0, 0.0, 0.0],
+        }]
+    }
+}
+
+fn build_node_bounds(snapshot: &Snapshot) -> Vec<GpuVertex> {
+    if let Some(tree) = &snapshot.tree {
+        let mut points = Vec::<GpuVertex>::new();
+        for node in tree.nodes.iter() {
+            let bounds = &node.data.aabb;
+            let color = [0.6, 0.2, 0.3, 0.2];
+            let mut edge = |s0: usize, s1: usize, e0: usize, e1: usize| {
+                points.push(GpuVertex {
+                    position: [bounds[s0], bounds[s1]],
+                    color,
+                });
+                points.push(GpuVertex {
+                    position: [bounds[e0], bounds[e1]],
+                    color,
+                });
+            };
+            edge(0, 1, 0, 3);
+            edge(0, 3, 2, 3);
+            edge(2, 3, 2, 1);
+            edge(2, 1, 0, 1);
+        }
+        points
+    } else {
+        vec![GpuVertex {
+            position: [0.0, 0.0],
+            color: [0.0; 4],
         }]
     }
 }
