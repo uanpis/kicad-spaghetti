@@ -31,9 +31,6 @@ pub struct Edge {
     pub i1: usize,
     pub w: f32,
     pub l0: f32,
-    // index of previous connected edge,
-    // usize::MAX = none
-    pub prev: usize,
     // visual debug
     pub mark: bool,
 }
@@ -76,6 +73,10 @@ impl Point {
         self.f = Vec2::ZERO;
     }
 
+    pub fn set_neighbors(&mut self, neighbors: u32) {
+        self.neighbors = neighbors;
+    }
+
     pub fn store_prev(&mut self) {
         self.pos_prev = self.pos;
     }
@@ -100,13 +101,12 @@ impl PointNodeData {
 }
 
 impl Edge {
-    pub fn new(i0: usize, i1: usize, w: f32, l0: f32, prev: usize) -> Self {
+    pub fn new(i0: usize, i1: usize, w: f32, l0: f32) -> Self {
         Self {
             i0,
             i1,
             w,
             l0,
-            prev,
             mark: false,
         }
     }
@@ -320,8 +320,8 @@ macro_rules! point {
     };
 }
 macro_rules! edge {
-    ($i0:expr, $i1:expr, $w:expr, $l0:expr, $n:expr) => {
-        Edge::new($i0, $i1, $w, $l0, $n)
+    ($i0:expr, $i1:expr, $w:expr, $l0:expr) => {
+        Edge::new($i0, $i1, $w, $l0)
     };
 }
 pub(crate) use {edge, point, vec2};

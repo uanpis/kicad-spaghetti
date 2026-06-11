@@ -5,6 +5,7 @@ use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use glam::Vec2;
 use kicad_ipc_rs::{KiCadClientBlocking, KiCadError, model::board::PcbItem};
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::*;
 use std::thread::{self /*, yield_now*/};
 //use thread_priority::{ThreadPriority, set_current_thread_priority};
 
@@ -25,9 +26,15 @@ const MIN_DIST: f32 = 0.05;
 pub struct SimSettings {
     pub damping: f32,
     pub noodliness: f32,
+
+    pub repulsion_degree: u32,
+    pub self_repulsion: bool,
+
     pub collision_elasticity: f32,
-    pub limit_step: bool,
+    pub collision_iterations: usize,
     pub self_collision: bool,
+
+    pub limit_step: bool,
 }
 
 impl SimSettings {
@@ -35,9 +42,15 @@ impl SimSettings {
         Self {
             damping: 1.0,
             noodliness: 0.5,
+
+            repulsion_degree: 3,
+            self_repulsion: true,
+
             collision_elasticity: 0.5,
-            limit_step: true,
+            collision_iterations: 3,
             self_collision: false,
+
+            limit_step: true,
         }
     }
 }
@@ -145,6 +158,7 @@ struct Data {
     net_map: HashMap<String, usize>,
     points: Vec<Point>,
     curves: Vec<Vec<Edge>>,
+
     tree: Option<QuadTree<Point, PointNodeData>>,
     net_trees: Vec<QuadTree<Point, PointNodeData>>,
 
@@ -400,7 +414,7 @@ impl Data {
                 i1_map.insert(i1, hash_set);
             }
 
-            edges_flat.push(edge!(i0, i1, w, l0, usize::MAX));
+            edges_flat.push(edge!(i0, i1, w, l0));
             self.min_rad = self.min_rad.min(0.5 * w);
         }
 
@@ -408,17 +422,17 @@ impl Data {
         // 1. walk backward until no more edges are found
         // 2. walk forwards adding edges to curve, until no more edges are found
         // 3. switch to next curve and repeat until all edges are exhausted.
-        let mut iterations = 0;
+        let mut backwards = true;
         let mut tmp_edges = Vec::<Edge>::new();
-        let mut to_add: HashSet<usize> = (0..edges_flat.len()).collect();
-        let mut edge = edges_flat[to_add.take(&0).unwrap()].clone();
+        //let mut to_add: HashSet<usize> = (0..edges_flat.len()).collect();
+        let mut edge = edges_flat.swap_remove(0);
         // remove first edge from pool
-        i0_map.remove(&edge.i0);
-        i1_map.remove(&edge.i1);
+        self.curves.push(Vec::<Edge>::new());
+        #[cfg(debug_assertions)]
+        let mut iterations = 0;
         #[cfg(debug_assertions)]
         println!("{:#?}", edges_flat);
-        self.curves.push(Vec::<Edge>::new());
-        while !to_add.is_empty() || !tmp_edges.is_empty() {
+        while !edges_flat.is_empty() || !tmp_edges.is_empty() {
             //println!("{:#?}", self.curves);
             #[cfg(debug_assertions)]
             {
@@ -428,48 +442,50 @@ impl Data {
                     "tmp_edges: {:?}",
                     tmp_edges.iter().map(|x| (x.i0, x.i1)).collect::<Vec<_>>()
                 );
-                println!("edges left to add: {:?}", to_add.iter().collect::<Vec<_>>());
+                println!(
+                    "edges left to add: {:?}",
+                    edges_flat.iter().collect::<Vec<_>>()
+                );
             }
 
-            if let Some(mut prevs) = i0_map.remove(&edge.i0) {
-                let prev = *prevs.iter().next().unwrap();
-                prevs.remove(&prev);
-                if !prevs.is_empty() {
-                    i0_map.insert(edge.i0, prevs);
-                }
-                if let Some(i) = to_add.take(&prev) {
-                    // walk backwards, with swap
+            if backwards {
+                // walk backwards
+                let found_edges: Vec<(bool, usize)> = edges_flat
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| {
+                        if e.i0 == edge.i0 {
+                            Some((true, i))
+                        } else if e.i1 == edge.i0 {
+                            Some((false, i))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !found_edges.is_empty()
+                    && let (swap, index) = found_edges[0]
+                {
                     tmp_edges.push(edge);
+                    edge = edges_flat.swap_remove(index);
+                    if swap {
+                        edge.swap();
+                    }
                     #[cfg(debug_assertions)]
-                    println!("edge that matched i0 = i0: {:?}", i);
-                    edge = edges_flat[i].clone();
-                    edge.swap();
-                    continue;
-                }
-            }
-            if let Some(mut prevs) = i1_map.remove(&edge.i0) {
-                let prev = *prevs.iter().next().unwrap();
-                prevs.remove(&prev);
-                if !prevs.is_empty() {
-                    i1_map.insert(edge.i0, prevs);
-                }
-                if let Some(i) = to_add.take(&prev) {
-                    // walk backwards
-                    tmp_edges.push(edge);
-                    #[cfg(debug_assertions)]
-                    println!("edge that matched i1 = i0: {:?}", i);
-                    edge = edges_flat[i].clone();
+                    println!("walk backward, matched edge: {:?}", index);
                     continue;
                 }
             }
             // insert, walk forwards
+            backwards = false;
             let i1 = edge.i1;
             self.curves.last_mut().unwrap().push(edge);
 
+            // if tmp list not empty, consume
             if let Some(next) = tmp_edges.pop() {
-                // if tmp list not empty, consume
                 edge = next;
-                if to_add.is_empty() && tmp_edges.is_empty() {
+                if edges_flat.is_empty() && tmp_edges.is_empty() {
                     self.curves.last_mut().unwrap().push(edge);
                     #[cfg(debug_assertions)]
                     println!("break !!!");
@@ -477,47 +493,42 @@ impl Data {
                 }
                 continue;
             }
-            if let Some(mut nexts) = i0_map.remove(&i1) {
-                let next = *nexts.iter().next().unwrap();
-                nexts.remove(&next);
-                if !nexts.is_empty() {
-                    i0_map.insert(i1, nexts);
-                }
-                if let Some(i) = to_add.take(&next) {
-                    // walk forwards
-                    #[cfg(debug_assertions)]
-                    println!("edge that matched i0 = i1: {:?}", i);
-                    edge = edges_flat[i].clone();
-                    continue;
-                }
-            }
-            if let Some(mut nexts) = i1_map.remove(&i1) {
-                let next = *nexts.iter().next().unwrap();
-                nexts.remove(&next);
-                if !nexts.is_empty() {
-                    i1_map.insert(i1, nexts);
-                }
-                if let Some(i) = to_add.take(&next) {
-                    // walk forwards, with swap
-                    #[cfg(debug_assertions)]
-                    println!("edge that matched i1 = i1: {:?}", i);
-                    edge = edges_flat[i].clone();
+            // walk forwards
+            let found_edges: Vec<(bool, usize)> = edges_flat
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    if e.i0 == i1 {
+                        Some((false, i))
+                    } else if e.i1 == i1 {
+                        Some((true, i))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !found_edges.is_empty()
+                && let (swap, index) = found_edges[0]
+            {
+                edge = edges_flat.swap_remove(index);
+                if swap {
                     edge.swap();
-                    continue;
                 }
+                #[cfg(debug_assertions)]
+                println!("walk forward, matched edge: {:?}", index);
+                continue;
             }
+
             // no connected edge found: switch to next curve
+            backwards = true;
             self.curves.push(Vec::<Edge>::new());
-            let n = *to_add.iter().next().unwrap();
-            edge = edges_flat[to_add.take(&n).unwrap()].clone();
-            if to_add.is_empty() && tmp_edges.is_empty() {
+            edge = edges_flat.swap_remove(0);
+            if edges_flat.is_empty() && tmp_edges.is_empty() {
                 self.curves.last_mut().unwrap().push(edge);
                 #[cfg(debug_assertions)]
                 println!("break !!!");
                 break;
             }
-            i0_map.remove(&n);
-            i1_map.remove(&n);
 
             #[cfg(debug_assertions)]
             {
@@ -540,12 +551,14 @@ impl Data {
         }
         self.points_to_back();
 
+        self.compute_neighbors();
         self.resample(&mut Vec::<Point>::new(), &mut Vec::<Vec<Edge>>::new());
         self.resample(&mut Vec::<Point>::new(), &mut Vec::<Vec<Edge>>::new());
         self.resample(&mut Vec::<Point>::new(), &mut Vec::<Vec<Edge>>::new());
+        /*
+         */
         self.sort_points();
         //self.sort_edges();
-        self.compute_neighbors();
         self.rebuild_tree();
         self.rebuild_net_trees();
         self.points_to_back();
@@ -574,34 +587,33 @@ impl Data {
 
     fn resample(&mut self, points_buf: &mut Vec<Point>, curves_buf: &mut Vec<Vec<Edge>>) {
         const ASPECT: f32 = 2.0;
+        const UNSUB_MAX_ANGLE: f32 = 20.0;
 
         // move points and edges to back buffer, write resampled to front
         std::mem::swap(&mut self.points, points_buf);
         std::mem::swap(&mut self.curves, curves_buf);
         self.points.clear();
         self.curves.clear();
-        self.tree.as_mut().unwrap().clear();
 
         let mut i0;
         let mut i1;
         for curve_read in curves_buf.iter() {
             let mut curve_write = Vec::<Edge>::new();
-            if !curve_read.is_empty() {
-                // insert first point
-                i0 = if let Some((i, _)) = self
-                    .points
-                    .iter()
-                    .enumerate()
-                    .find(|(_, x)| x.pos == points_buf[curve_read[0].i0].pos)
-                {
-                    i
-                } else {
-                    self.points.push(points_buf[curve_read[0].i0].clone());
-                    self.points.len() - 1
-                };
-            } else {
+            if curve_read.is_empty() {
                 continue;
             }
+            // first point
+            i0 = if let Some((j, _)) = self
+                .points
+                .iter()
+                .enumerate()
+                .find(|(_, x)| x.pos == points_buf[curve_read[0].i0].pos)
+            {
+                j
+            } else {
+                self.points.push(points_buf[curve_read[0].i0].clone());
+                self.points.len() - 1
+            };
             let mut l0 = 0.0;
             let mut unsubdivide = false;
             for i in 0..curve_read.len() {
@@ -620,74 +632,56 @@ impl Data {
                 let len = edge.length(points_buf);
                 let segment_size = w * ASPECT;
 
+                // unsubdivide
                 if len < 0.5 * segment_size
                     && !unsubdivide
                     && points_buf[edge.i1].neighbors == 2
                     && edge.w == next_w
+                    && {
+                        // angle
+                        let p0 = points_buf[edge.i0].pos;
+                        let p1 = points_buf[edge.i1].pos;
+                        let p2 = points_buf[curve_read[i + 1].i1].pos;
+                        (p0 - p1).angle_to(p2 - p1) < UNSUB_MAX_ANGLE * 180.0 / PI
+                    }
                 {
-                    // unsubdivide
                     unsubdivide = true;
                     continue;
                 }
 
+                // subdivide
                 if len > 1.5 * segment_size && !unsubdivide {
-                    // subdivide
                     let p0 = points_buf[edge.i0].pos;
                     let p1 = points_buf[edge.i1].pos;
                     let net = points_buf[edge.i0].net;
                     l0 *= 0.5;
-                    let point = point!(0.5 * (p1 + p0), w, net);
+                    let mut point = point!(0.5 * (p1 + p0), 0.5 * w, net);
+                    point.set_neighbors(2);
                     i1 = self.points.len();
                     self.points.push(point);
-                    curve_write.push(edge!(i0, i1, w, l0, usize::MAX));
+                    curve_write.push(edge!(i0, i1, w, l0));
                     i0 = i1;
                 }
 
                 unsubdivide = false;
-                let point = points_buf[edge.i1].clone();
-                i1 = if i == curve_read.len() - 1
-                    && let Some((i, _)) = self
+                i1 = if (i == curve_read.len() - 1 || points_buf[edge.i1].neighbors > 1)
+                    && let Some((j, _)) = self
                         .points
                         .iter()
                         .enumerate()
-                        .find(|(_, x)| x.pos == points_buf[curve_read[0].i0].pos)
+                        .find(|(_, x)| x.pos == points_buf[curve_read[i].i1].pos)
                 {
-                    i
+                    j
                 } else {
+                    let point = points_buf[edge.i1].clone();
                     self.points.push(point);
                     self.points.len() - 1
                 };
-                curve_write.push(edge!(i0, i1, w, l0, usize::MAX));
+                curve_write.push(edge!(i0, i1, w, l0));
                 i0 = i1;
             }
             self.curves.push(curve_write);
         }
-        /*
-        let n = (ASPECT * len / w).round() as usize;
-        let l0 = len / n as f32;
-
-        if n > 1 {
-            let delta = (p1 - p0) / n as f32;
-            let mut end = point!(p0 + delta, 0.5 * w, net);
-            end.neighbors = 2;
-            let mut iend = self.add_point(end);
-
-            self.edges[i].i1 = iend;
-            self.edges[i].l0 = l0;
-
-            let mut istart;
-            let mut prev = self.edges[i].prev;
-            for j in 2..n + 1 {
-                istart = iend;
-
-                end = point!(p0 + delta * j as f32, 0.5 * w, net);
-                end.neighbors = 2;
-                iend = self.add_point(end);
-                self.edges.push(edge!(istart, iend, w, l0, prev));
-                prev = self.edges.len() - 1;
-            }
-        }
-        */
     }
 
     fn compute_neighbors(&mut self) {
@@ -701,6 +695,8 @@ impl Data {
         &self,
         stack: &mut Vec<(Idx<Node<PointNodeData>>, f32)>,
         index: usize,
+        degree: u32,
+        self_repulsion: bool,
     ) -> Vec2 {
         let pos = self.points[index].pos;
         let net = self.points[index].net;
@@ -718,7 +714,13 @@ impl Data {
 
                 if rad * rad / distsq < METRIC * METRIC {
                     let distsq = distsq.max(MIN_DIST);
-                    force += tree.nodes[node].data.rad * delta / (distsq * distsq);
+                    let divisor = if (degree + 1).is_multiple_of(2) {
+                        distsq.powi(((degree + 1) >> 1) as i32)
+                    } else {
+                        let dist = distsq.sqrt();
+                        dist.powi((degree + 1) as i32)
+                    };
+                    force += tree.nodes[node].data.rad * delta / divisor;
                 } else {
                     if tree.nodes[node].is_leaf {
                         let offset = tree.nodes[node].items;
@@ -730,8 +732,14 @@ impl Data {
                                 continue;
                             };
                             let distsq = distsq.max(MIN_DIST);
+                            let divisor = if (degree + 1).is_multiple_of(2) {
+                                distsq.powi(((degree + 1) >> 1) as i32)
+                            } else {
+                                let dist = distsq.sqrt();
+                                dist.powi((degree + 1) as i32)
+                            };
 
-                            force += self.points[*j].rad * delta / (distsq * distsq);
+                            force += self.points[*j].rad * delta / divisor;
                         }
                     } else {
                         for child in tree.nodes[node]
@@ -747,7 +755,13 @@ impl Data {
             force
         };
         let mass = self.points[index].rad;
-        mass * (calc(self.tree.as_ref().unwrap()) - calc(&self.net_trees[net]))
+        let all = calc(self.tree.as_ref().unwrap());
+        let same = if self_repulsion {
+            Vec2::ZERO
+        } else {
+            calc(&self.net_trees[net])
+        };
+        mass * (all - same)
     }
 
     fn collide_edge(
@@ -756,13 +770,14 @@ impl Data {
         curve_index: usize,
         edge_index: usize,
         elasticity: f32,
+        self_collision: bool,
     ) {
         let i0 = self.curves[curve_index][edge_index].i0;
         let i1 = self.curves[curve_index][edge_index].i1;
         let net = self.points[self.curves[curve_index][edge_index].i0].net;
         let mut p0 = self.points[i0].pos;
         let mut p1 = self.points[i1].pos;
-        let r = 0.5 * self.curves[curve_index][edge_index].w;
+        let rad = 0.5 * self.curves[curve_index][edge_index].w;
         let mut aabb = self.curves[curve_index][edge_index].get_aabb(&self.points);
 
         self.curves[curve_index][edge_index].mark = false;
@@ -785,7 +800,9 @@ impl Data {
                     let point_pos = self.points[*j].pos;
                     let point_rad = self.points[*j].rad;
                     // cheap check
-                    if point_net != net && aabb.collide_square(point_pos, point_rad) {
+                    if (point_net != net || point_rad == rad && self_collision)
+                        && aabb.collide_square(point_pos, point_rad)
+                    {
                         let e = p1 - p0;
                         let d0 = point_pos - p0;
 
@@ -793,7 +810,7 @@ impl Data {
 
                         let normal = d0 - e * t;
                         let dist_sq = normal.length_squared();
-                        let collision_dist = r + point_rad;
+                        let collision_dist = rad + point_rad;
                         // TODO netclass clearance
                         if dist_sq != 0.0 && dist_sq < collision_dist * collision_dist {
                             self.curves[curve_index][edge_index].mark = true;
@@ -807,7 +824,7 @@ impl Data {
                             let weight = if self.points[*j].neighbors < 2 {
                                 1.0
                             } else {
-                                self.points[j.as_usize()].pos -= delta_pos * r / collision_dist;
+                                self.points[j.as_usize()].pos -= delta_pos * rad / collision_dist;
                                 point_rad / collision_dist
                             };
                             let diff = delta_pos * weight;
@@ -817,7 +834,7 @@ impl Data {
                             if self.points[i1].neighbors > 1 {
                                 p1 += diff * t;
                             }
-                            aabb = AABB::edge(p0, p1, r);
+                            aabb = AABB::edge(p0, p1, rad);
                             #[cfg(debug_assertions)]
                             {
                                 assert!(!self.points[*j].pos.is_nan());
@@ -852,6 +869,9 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
     let mut collision_stack = Vec::<Idx<Node<PointNodeData>>>::new();
     let mut sim_settings = SimSettings::new();
 
+    let mut points_buf = Vec::<Point>::new();
+    let mut edges_buf = Vec::<Vec<Edge>>::new();
+
     while running {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
@@ -881,10 +901,9 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
         if !paused {
             data.iterations += 1;
             // TODO parallelize
-            if data.iterations.is_multiple_of(64) {
-                //data.resample();
+            if data.iterations.is_multiple_of(8) {
+                data.resample(&mut points_buf, &mut edges_buf);
                 data.sort_points();
-                //data.sort_edges();
                 data.rebuild_tree();
                 data.rebuild_net_trees();
                 data.points_to_back();
@@ -893,8 +912,13 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
             // apply forces
             let k = 2.0;
             for i in 0..data.points.len() {
-                data.points[i].f =
-                    data.compute_force(&mut force_stack, i) * k * sim_settings.noodliness;
+                data.points[i].f = data.compute_force(
+                    &mut force_stack,
+                    i,
+                    sim_settings.repulsion_degree,
+                    sim_settings.self_repulsion,
+                ) * k
+                    * sim_settings.noodliness;
             }
             for edge in data.curves.iter().flatten() {
                 edge.apply_tension(&mut data.points, k * (1.0 - sim_settings.noodliness));
@@ -915,7 +939,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
             data.rebuild_net_trees();
 
             // collide
-            for _ in 0..4 {
+            for _ in 0..sim_settings.collision_iterations {
                 for i in 0..data.curves.len() {
                     for j in 0..data.curves[i].len() {
                         data.collide_edge(
@@ -923,6 +947,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
                             i,
                             j,
                             sim_settings.collision_elasticity,
+                            sim_settings.self_collision,
                         );
                     }
                 }

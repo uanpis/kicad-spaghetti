@@ -56,12 +56,22 @@ pub struct Draw2D {
     pub debug_pipeline: wgpu::RenderPipeline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display, strum_macros::EnumIter)]
+pub enum ColorMode {
+    #[strum(to_string = "Layer (Default)")]
+    Layer,
+    Edge,
+    Curve,
+}
+
 #[derive(Debug)]
 pub struct RenderSettings {
     pub debug: bool,
     pub quadtree: bool,
     pub nodebounds: bool,
     pub mass_circles: bool,
+    pub color_mode: ColorMode,
+    pub edge_mark: bool,
 }
 
 impl Draw2D {
@@ -73,9 +83,11 @@ impl Draw2D {
     ) -> Self {
         let render_settings = RenderSettings {
             debug: true,
-            quadtree: true,
-            nodebounds: true,
+            quadtree: false,
+            nodebounds: false,
             mass_circles: false,
+            color_mode: ColorMode::Layer,
+            edge_mark: true,
         };
 
         const QUAD_VERTS: &[[f32; 2]] = &[
@@ -88,7 +100,11 @@ impl Draw2D {
         ];
 
         // buffers
-        let instances = build_edge_instances(snapshot);
+        let instances = build_edge_instances(
+            snapshot,
+            render_settings.color_mode,
+            render_settings.edge_mark,
+        );
         let circle_instances = Vec::<CircleInstance>::new();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Edge Instance Buffer"),
@@ -313,7 +329,11 @@ impl Draw2D {
     }
 
     pub fn rebuild(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, snapshot: &Snapshot) {
-        let instances = build_edge_instances(snapshot);
+        let instances = build_edge_instances(
+            snapshot,
+            self.render_settings.color_mode,
+            self.render_settings.edge_mark,
+        );
         let count = instances.len() as u32;
         if count == self.instance_count {
             queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
@@ -376,27 +396,58 @@ impl Draw2D {
     }
 }
 
-fn build_edge_instances(snapshot: &Snapshot) -> Vec<EdgeInstance> {
+fn build_edge_instances(
+    snapshot: &Snapshot,
+    color_mode: ColorMode,
+    mark: bool,
+) -> Vec<EdgeInstance> {
     let color = [0.1, 0.3, 0.8, 1.0f32];
     let color_mark = [0.8, 0.3, 0.1, 1.0f32];
 
-    snapshot
-        .curves
-        .iter()
-        .flatten()
-        .map(|edge| {
-            let color = if edge.mark { color_mark } else { color };
-
+    let mut vec = Vec::<EdgeInstance>::new();
+    for i in 0..snapshot.curves.len() {
+        for j in 0..snapshot.curves[i].len() {
+            let edge = &snapshot.curves[i][j];
+            //let mut color = if edge.mark { color_mark } else { color };
+            let color = if mark && edge.mark {
+                color_mark
+            } else {
+                fn square(x: f32) -> f32 {
+                    x * x
+                }
+                match color_mode {
+                    ColorMode::Layer => color,
+                    ColorMode::Edge => {
+                        let t = 2.399963 * j as f32;
+                        [
+                            square(0.5 + 0.5 * t.sin()),
+                            square(0.5 + 0.5 * (t + 2.0943951).sin()),
+                            square(0.5 + 0.5 * (t + 4.1887902).sin()),
+                            1.0,
+                        ]
+                    }
+                    ColorMode::Curve => {
+                        let t = 2.399963 * i as f32;
+                        [
+                            square(0.5 + 0.5 * t.sin()),
+                            square(0.5 + 0.5 * (t + 2.0943951).sin()),
+                            square(0.5 + 0.5 * (t + 4.1887902).sin()),
+                            1.0,
+                        ]
+                    }
+                }
+            };
             let p0 = snapshot.points[edge.i0].pos;
             let p1 = snapshot.points[edge.i1].pos;
-            EdgeInstance {
+            vec.push(EdgeInstance {
                 p0: [p0.x, p0.y],
                 p1: [p1.x, p1.y],
                 radius: edge.w * 0.5,
                 color,
-            }
-        })
-        .collect()
+            })
+        }
+    }
+    vec
 }
 
 fn build_point_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {

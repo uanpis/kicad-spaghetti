@@ -1,12 +1,6 @@
 use crate::draw::*;
 use crate::gui::EguiRenderer;
 use crate::sim::Sim;
-use egui::{
-    CollapsingHeader,
-    collapsing_header::CollapsingState,
-    style::HandleShape,
-    widgets::{Slider, SliderClamping},
-};
 use egui_wgpu::{ScreenDescriptor, wgpu};
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,9 +14,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const FPS_INTERVAL_MS: u128 = 500;
-
-struct AppState {
+pub struct AppState {
     pub sim: Sim,
     pub draw2d: Draw2D,
     pub leftpanel: bool,
@@ -37,14 +29,12 @@ struct AppState {
     pub surface_config: wgpu::SurfaceConfiguration,
     pub surface: wgpu::Surface<'static>,
     pub scale_factor: f32,
-    pub egui_renderer: EguiRenderer,
 }
 
 impl AppState {
     async fn new(
         instance: &wgpu::Instance,
         surface: wgpu::Surface<'static>,
-        window: &Window,
         width: u32,
         height: u32,
     ) -> Self {
@@ -93,8 +83,6 @@ impl AppState {
 
         surface.configure(&device, &surface_config);
 
-        let egui_renderer = EguiRenderer::new(&device, surface_config.format, window);
-
         let scale_factor = 1.0;
 
         let sim = Sim::new();
@@ -116,7 +104,6 @@ impl AppState {
             queue,
             surface,
             surface_config,
-            egui_renderer,
             scale_factor,
         }
     }
@@ -166,15 +153,19 @@ pub struct App {
     instance: wgpu::Instance,
     state: Option<AppState>,
     window: Option<Arc<Window>>,
+    egui_renderer: Option<EguiRenderer>,
 }
 
 impl App {
     pub fn new() -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+
         Self {
             instance,
             state: None,
             window: None,
+
+            egui_renderer: None,
         }
     }
 
@@ -190,17 +181,12 @@ impl App {
             .create_surface(window.clone())
             .expect("Failed to create surface!");
 
-        let state = AppState::new(
-            &self.instance,
-            surface,
-            &window,
-            initial_width,
-            initial_width,
-        )
-        .await;
+        let state = AppState::new(&self.instance, surface, initial_width, initial_width).await;
+        let egui_renderer = EguiRenderer::new(&state.device, state.surface_config.format, &window);
 
         self.window.get_or_insert(window);
         self.state.get_or_insert(state);
+        self.egui_renderer.get_or_insert(egui_renderer);
     }
 
     fn handle_resized(&mut self, width: u32, height: u32) {
@@ -284,195 +270,10 @@ impl App {
 
         let window = self.window.as_ref().unwrap();
         {
-            state.egui_renderer.begin_frame(window);
-
-            #[allow(deprecated)]
-            egui::CentralPanel::no_frame().show(state.egui_renderer.context(), |ui| {
-                egui::Panel::top(egui::Id::new("top_panel"))
-                    .resizable(false)
-                    .show_inside(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.toggle_value(&mut state.leftpanel, "⬅");
-                            if ui.button("↺").on_hover_text("Reset [R]").clicked() {
-                                state.sim.reset();
-                            }
-                            if ui
-                                .button(if state.paused { "⏵" } else { "⏸" })
-                                .on_hover_text(if state.paused {
-                                    "Run [Space]"
-                                } else {
-                                    "Pause [Space]"
-                                })
-                                .clicked()
-                            {
-                                if state.paused {
-                                    state.sim.resume();
-                                } else {
-                                    state.sim.pause();
-                                }
-                                state.paused = !state.paused;
-                            }
-                        });
-                    });
-                egui::Panel::left(egui::Id::new("left_panel"))
-                    .resizable(true)
-                    .default_size(250.0)
-                    .size_range(100.0..=500.0)
-                    .show_animated_inside(ui, state.leftpanel, |ui| {
-                        CollapsingHeader::new("Simulation")
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                if ui
-                                    .add(
-                                        Slider::new(
-                                            &mut state.sim.sim_settings.damping,
-                                            0.1..=10.0,
-                                        )
-                                        .logarithmic(true)
-                                        .clamping(SliderClamping::Never)
-                                        .smart_aim(true)
-                                        .text("Damping")
-                                        .trailing_fill(true)
-                                        .handle_shape(HandleShape::Rect { aspect_ratio: 0.5 }),
-                                    )
-                                    //TODO implement
-                                    .on_hover_text("This does nothing for now (:")
-                                    .changed()
-                                    || ui
-                                        .add(
-                                            Slider::new(
-                                                &mut state.sim.sim_settings.noodliness,
-                                                0.0..=1.0,
-                                            )
-                                            .logarithmic(false)
-                                            .clamping(SliderClamping::Never)
-                                            .smart_aim(true)
-                                            .text("Noodliness")
-                                            .trailing_fill(true)
-                                            .handle_shape(HandleShape::Rect { aspect_ratio: 0.5 }),
-                                        )
-                                        .on_hover_text("Repulsive force / tension ratio")
-                                        .changed()
-                                    || if let Some(c) = CollapsingHeader::new("Advanced")
-                                        .default_open(true)
-                                        .show(ui, |ui| {
-                                            ui.add(
-                                                Slider::new(
-                                                    &mut state
-                                                        .sim
-                                                        .sim_settings
-                                                        .collision_elasticity,
-                                                    0.0..=1.0,
-                                                )
-                                                .logarithmic(false)
-                                                .clamping(SliderClamping::Never)
-                                                .smart_aim(true)
-                                                .text("Collision Elasticity")
-                                                .trailing_fill(true)
-                                                .handle_shape(HandleShape::Rect {
-                                                    aspect_ratio: 0.5,
-                                                }),
-                                            )
-                                            .on_hover_text("Bounciness of collisions between objects")
-                                            .changed()
-                                                || ui
-                                                    .checkbox(
-                                                        &mut state.sim.sim_settings.limit_step,
-                                                        "Limit step size",
-                                                    )
-                                                    .on_hover_text("Clamp step size to half of the smallest track width")
-                                                    .changed()
-                                                || ui
-                                                    .checkbox(
-                                                        &mut state.sim.sim_settings.self_collision,
-                                                        "Self collision",
-                                                    )
-                                                    .on_hover_text("Enable collisions between objects in the same net")
-                                                    .changed()
-                                        })
-                                        .body_response
-                                    {
-                                        c.changed()
-                                    } else {
-                                        false
-                                    }
-                                {
-                                    state.sim.update_settings();
-                                };
-                            });
-                        CollapsingHeader::new("Graphics")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                CollapsingHeader::new("UI")
-                                    .default_open(false)
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(format!(
-                                                "Pixels per point: {}",
-                                                state.egui_renderer.context().pixels_per_point()
-                                            ));
-                                            if ui.button("-").clicked() {
-                                                state.scale_factor =
-                                                    (state.scale_factor - 0.1).max(0.3);
-                                            }
-                                            if ui.button("+").clicked() {
-                                                state.scale_factor =
-                                                    (state.scale_factor + 0.1).min(3.0);
-                                            }
-                                        });
-                                    });
-
-                                CollapsingState::load_with_default_open(
-                                    ui.ctx(),
-                                    ui.make_persistent_id("DebugSettings"),
-                                    false,
-                                )
-                                .show_header(ui, |ui| {
-                                    ui.checkbox(&mut state.draw2d.render_settings.debug, "Debug");
-                                })
-                                .body(|ui| {
-                                    ui.add_enabled_ui(state.draw2d.render_settings.debug, |ui| {
-                                        ui.checkbox(
-                                            &mut state.draw2d.render_settings.quadtree,
-                                            "QuadTree",
-                                        );
-                                        ui.checkbox(
-                                            &mut state.draw2d.render_settings.nodebounds,
-                                            "Node Bounding Boxes",
-                                        );
-                                        ui.checkbox(
-                                            &mut state.draw2d.render_settings.mass_circles,
-                                            "Mass Circles",
-                                        );
-                                    })
-                                });
-                            });
-
-                        CollapsingHeader::new("Stats")
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                let delta_t = state.time.elapsed().as_millis();
-                                if delta_t >= FPS_INTERVAL_MS {
-                                    let i = state.sim.snapshot.iterations;
-                                    let n = i - state.iterations;
-                                    state.fps = 1000.0 * n as f32 / delta_t as f32;
-                                    state.iterations = i;
-                                    state.time = Instant::now();
-                                }
-
-                                ui.label(format!("fps: {}", state.fps));
-                                ui.label(format!("points: {}", state.sim.snapshot.points.len()));
-                                ui.label(format!("curves: {}", state.sim.snapshot.curves.len()));
-                                ui.label(format!("edges: {}", state.sim.snapshot.curves.iter().flatten().count()));
-                            });
-                        ui.add(egui::Separator::default().grow(8.0));
-                        ui.vertical_centered(|ui| {
-                            ui.label("Left Panel");
-                        });
-                    });
-            });
-
-            state.egui_renderer.end_frame_and_draw(
+            let egui_renderer = self.egui_renderer.as_mut().unwrap();
+            egui_renderer.begin_frame(window);
+            egui_renderer.build_ui(state);
+            egui_renderer.end_frame_and_draw(
                 &state.device,
                 &state.queue,
                 &mut encoder,
@@ -497,10 +298,9 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        self.state
+        self.egui_renderer
             .as_mut()
             .unwrap()
-            .egui_renderer
             .handle_input(self.window.as_ref().unwrap(), &event);
         match event {
             WindowEvent::CloseRequested => {

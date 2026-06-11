@@ -28,6 +28,10 @@ thread-priority = "3.0.0"
 itertools = "0.14.0"
 profiling = "1.0.18"
 tracy-client = "0.18.4"
+strum = "0.28.0"
+strum_macros = "0.28.0"
+num = "0.4.3"
+emath = "0.34.3"
 
 [features]
 mark = []
