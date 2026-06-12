@@ -5,6 +5,7 @@ mod physics;
 mod sim;
 mod tree;
 mod typed_idx;
+mod utils;
 use app::App;
 use winit::event_loop::{ControlFlow, EventLoop};
 

@@ -401,7 +401,7 @@ fn build_edge_instances(
     color_mode: ColorMode,
     mark: bool,
 ) -> Vec<EdgeInstance> {
-    let color = [0.1, 0.3, 0.8, 1.0f32];
+    //let color = [0.1, 0.3, 0.8, 1.0f32];
     let color_mark = [0.8, 0.3, 0.1, 1.0f32];
 
     let mut vec = Vec::<EdgeInstance>::new();
@@ -415,26 +415,19 @@ fn build_edge_instances(
                 fn square(x: f32) -> f32 {
                     x * x
                 }
+                fn hue(seed: usize) -> [f32; 4] {
+                    let t = 2.399963 * seed as f32;
+                    [
+                        square(0.5 + 0.5 * t.sin()),
+                        square(0.5 + 0.5 * (t + 2.0943951).sin()),
+                        square(0.5 + 0.5 * (t + 4.1887902).sin()),
+                        1.0,
+                    ]
+                }
                 match color_mode {
-                    ColorMode::Layer => color,
-                    ColorMode::Edge => {
-                        let t = 2.399963 * j as f32;
-                        [
-                            square(0.5 + 0.5 * t.sin()),
-                            square(0.5 + 0.5 * (t + 2.0943951).sin()),
-                            square(0.5 + 0.5 * (t + 4.1887902).sin()),
-                            1.0,
-                        ]
-                    }
-                    ColorMode::Curve => {
-                        let t = 2.399963 * i as f32;
-                        [
-                            square(0.5 + 0.5 * t.sin()),
-                            square(0.5 + 0.5 * (t + 2.0943951).sin()),
-                            square(0.5 + 0.5 * (t + 4.1887902).sin()),
-                            1.0,
-                        ]
-                    }
+                    ColorMode::Layer => hue(snapshot.points[edge.i0].layer),
+                    ColorMode::Edge => hue(j),
+                    ColorMode::Curve => hue(i),
                 }
             };
             let p0 = snapshot.points[edge.i0].pos;
@@ -471,9 +464,9 @@ fn build_point_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
 }
 
 fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
-    if let Some(tree) = &snapshot.tree {
+    if !snapshot.trees.is_empty() {
         let mut points = Vec::<CircleInstance>::new();
-        for node in tree.nodes.iter() {
+        for node in snapshot.trees.iter().flat_map(|tree| &tree.nodes) {
             points.push(CircleInstance {
                 center: [node.data.pos.x, node.data.pos.y],
                 radius: 1.5 * node.data.rad.sqrt(),
@@ -491,9 +484,9 @@ fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
 }
 
 fn build_node_bounds(snapshot: &Snapshot) -> Vec<GpuVertex> {
-    if let Some(tree) = &snapshot.tree {
+    if !snapshot.trees.is_empty() {
         let mut points = Vec::<GpuVertex>::new();
-        for node in tree.nodes.iter() {
+        for node in snapshot.trees.iter().flat_map(|tree| &tree.nodes) {
             let bounds = &node.data.aabb;
             let color = [0.6, 0.2, 0.3, 0.2];
             let mut edge = |s0: usize, s1: usize, e0: usize, e1: usize| {
@@ -522,9 +515,11 @@ fn build_node_bounds(snapshot: &Snapshot) -> Vec<GpuVertex> {
 
 fn build_debug_tree(snapshot: &Snapshot) -> Vec<GpuVertex> {
     let color = [0.5, 0.5, 0.5, 0.2];
-    if let Some(tree) = &snapshot.tree {
-        tree.get_viz()
+    if !snapshot.trees.is_empty() {
+        snapshot
+            .trees
             .iter()
+            .flat_map(|tree| tree.get_viz())
             .flat_map(|v| {
                 [
                     GpuVertex {

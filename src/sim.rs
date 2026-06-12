@@ -1,9 +1,11 @@
 use crate::physics::*;
 use crate::tree::{Node, QTreeItem, QuadTree};
 use crate::typed_idx::Idx;
+use crate::utils::*;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use glam::Vec2;
 use kicad_ipc_rs::{KiCadClientBlocking, KiCadError, model::board::PcbItem};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::*;
 use std::thread::{self /*, yield_now*/};
@@ -18,6 +20,7 @@ pub enum Command {
     UpdateSettings(SimSettings),
 }
 
+const PARALLEL_CHUNK_SIZE: usize = 256;
 const SCALING_FACTOR: f32 = 1e-6f32; // nm -> mm
 const METRIC: f32 = 0.5;
 const MIN_DIST: f32 = 0.05;
@@ -127,7 +130,7 @@ pub struct Snapshot {
     pub radius: f32,
     pub points: Vec<Point>,
     pub curves: Vec<Vec<Edge>>,
-    pub tree: Option<QuadTree<Point, PointNodeData>>, // only copy if debug
+    pub trees: Vec<QuadTree<Point, PointNodeData>>,
     pub new: bool,
 }
 
@@ -141,7 +144,7 @@ impl Snapshot {
             radius: 0.0,
             points,
             curves,
-            tree: None,
+            trees: Vec::<QuadTree<Point, PointNodeData>>::new(),
             new: true,
         }
     }
@@ -155,39 +158,17 @@ struct Data {
     debug: bool,
     iterations: u64,
     kicad_client: KiCadClientBlocking,
+
     net_map: HashMap<String, usize>,
+    layer_map: HashMap<i32, usize>,
+
     points: Vec<Point>,
     curves: Vec<Vec<Edge>>,
 
-    tree: Option<QuadTree<Point, PointNodeData>>,
-    net_trees: Vec<QuadTree<Point, PointNodeData>>,
+    trees: Vec<QuadTree<Point, PointNodeData>>,
+    net_trees: Vec<Vec<QuadTree<Point, PointNodeData>>>,
 
     min_rad: f32,
-}
-
-fn f32_to_ordered_u32(f: f32) -> u32 {
-    let bits = f.to_bits();
-    if bits >> 31 == 0 {
-        bits | 0x8000_0000
-    } else {
-        !bits
-    }
-}
-
-fn morton(pos: Vec2) -> u64 {
-    let xi = f32_to_ordered_u32(pos.x);
-    let yi = f32_to_ordered_u32(pos.y);
-    spread(xi) | (spread(yi) << 1)
-}
-
-fn spread(x: u32) -> u64 {
-    let mut x = x as u64;
-    x = (x | (x << 16)) & 0x0000_FFFF_0000_FFFF;
-    x = (x | (x << 8)) & 0x00FF_00FF_00FF_00FF;
-    x = (x | (x << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
-    x = (x | (x << 2)) & 0x3333_3333_3333_3333;
-    x = (x | (x << 1)) & 0x5555_5555_5555_5555;
-    x
 }
 
 impl Data {
@@ -195,18 +176,20 @@ impl Data {
         // TODO handle no kicad
         let kicad_client = KiCadClientBlocking::connect().expect("Could not connect to KiCad");
         let net_map = HashMap::new();
+        let layer_map = HashMap::new();
         let points = Vec::<Point>::new();
         let curves = Vec::<Vec<Edge>>::new();
-        let tree = None;
-        let net_trees = Vec::<QuadTree<Point, PointNodeData>>::new();
+        let trees = Vec::<QuadTree<Point, PointNodeData>>::new();
+        let net_trees = Vec::<Vec<QuadTree<Point, PointNodeData>>>::new();
         Self {
             debug,
             iterations: 0,
             kicad_client,
             net_map,
+            layer_map,
             points,
             curves,
-            tree,
+            trees,
             net_trees,
             min_rad: f32::INFINITY,
         }
@@ -217,52 +200,55 @@ impl Data {
         self.points.iter_mut().for_each(|p| p.store_prev());
     }
 
-    fn rebuild_tree(&mut self) {
-        if let Some(tree) = self.tree.as_mut() {
-            tree.clear();
-            for i in 0..self.points.len() {
-                tree.insert_item(None, &mut self.points, i);
-            }
-            tree.update_bottom_up(&self.points);
+    fn rebuild_trees(&mut self) {
+        for layer in 0..self.layer_map.len() {
+            self.trees[layer].clear();
+        }
+        for i in 0..self.points.len() {
+            let layer = self.points[i].layer;
+            self.trees[layer].insert_item(None, &mut self.points, i);
+        }
+        for layer in 0..self.layer_map.len() {
+            self.trees[layer].update_bottom_up(&self.points);
         }
     }
 
     fn rebuild_net_trees(&mut self) {
-        for net in 0..self.net_map.len() {
-            self.net_trees[net].clear();
+        for layer in 0..self.layer_map.len() {
+            for net in 0..self.net_map.len() {
+                self.net_trees[layer][net].clear();
+            }
         }
         for i in 0..self.points.len() {
             let net = self.points[i].net;
-            self.net_trees[net].insert_item(None, &mut self.points, i);
+            let layer = self.points[i].layer;
+            self.net_trees[layer][net].insert_item(None, &mut self.points, i);
         }
-        for net in 0..self.net_map.len() {
-            self.net_trees[net].update_bottom_up(&self.points);
+        for layer in 0..self.layer_map.len() {
+            for net in 0..self.net_map.len() {
+                self.net_trees[layer][net].update_bottom_up(&self.points);
+            }
         }
     }
 
     fn add_point(&mut self, point: Point) -> usize {
-        if let Some(i) = self
-            .tree
-            .as_ref()
-            .unwrap()
-            .find_item(&self.points, point.get_pos())
-        {
+        let layer = point.layer;
+        if let Some(i) = self.trees[layer].find_item(&self.points, point.get_pos()) {
             self.points[i].rad = self.points[i].rad.max(point.rad);
             i.as_usize()
         } else {
             self.points.push(point);
             let i = self.points.len() - 1;
-            self.tree
-                .as_mut()
-                .unwrap()
-                .insert_item(None, &mut self.points, i);
+            self.trees[layer].insert_item(None, &mut self.points, i);
             i
         }
     }
 
     fn sort_points(&mut self) {
         let mut indices: Vec<usize> = (0..self.points.len()).collect();
-        indices.sort_unstable_by_key(|&i| morton(self.points[i].pos));
+        indices.sort_unstable_by_key(|&i| {
+            (self.points[i].layer as u128) << 64 | morton(self.points[i].pos) as u128
+        });
 
         let mut inverse = vec![0usize; indices.len()];
         for (new, &old) in indices.iter().enumerate() {
@@ -292,13 +278,6 @@ impl Data {
         }
     }
 
-    /*
-    fn sort_edges(&mut self) {
-        self.edges
-            .sort_unstable_by_key(|x| morton(self.points[x.i0].pos + self.points[x.i1].pos));
-    }
-    */
-
     fn import(&mut self) -> Result<(), KiCadError> {
         let items = self.kicad_client.get_items_by_type_codes(vec![11])?;
         //println!("{:#?}", tracks);
@@ -314,6 +293,17 @@ impl Data {
             })
             .collect();
 
+        // add layers to layer_map
+        self.kicad_client
+            .get_board_stackup()?
+            .layers
+            .iter()
+            .filter(|x| x.layer_type == kicad_ipc_rs::model::board::BoardStackupLayerType::Copper)
+            .enumerate()
+            .for_each(|(n, stackuplayer)| {
+                self.layer_map.insert(stackuplayer.layer.id, n);
+            });
+
         macro_rules! conv_nm {
             ($x:expr) => {
                 SCALING_FACTOR * $x as f32
@@ -325,13 +315,8 @@ impl Data {
             };
         }
         macro_rules! conv_point {
-            ($v:expr, $r:expr, $n:expr) => {
-                point!(
-                    conv_nm!($v.unwrap().x_nm),
-                    conv_nm!($v.unwrap().y_nm),
-                    $r,
-                    $n
-                )
+            ($pos:expr, $rad:expr, $net:expr, $layer:expr) => {
+                point!(conv_vec!($pos), $rad, $net, $layer)
             };
         }
 
@@ -357,29 +342,17 @@ impl Data {
         let d = if dif.x > dif.y { dif.x } else { dif.y };
         let root_rad = 1.0 * d;
 
-        self.tree = Some(QuadTree::<Point, PointNodeData>::new(root_pos, root_rad));
-
-        /*
-        for net in self.kicad_client.get_nets().unwrap() {
-            println!("found net {} \"{}\"", net.code, net.name);
+        for _ in 0..self.layer_map.len() {
+            self.trees
+                .push(QuadTree::<Point, PointNodeData>::new(root_pos, root_rad));
         }
-        for layer in self.kicad_client.get_board_enabled_layers().unwrap().layers {
-            println!("found layer {} \"{}\"", layer.id, layer.name);
-        }
-        */
-        let firstlayer = self.kicad_client.get_board_enabled_layers().unwrap().layers[0].id;
 
         // build unsorted flat vector of edges
         let mut edges_flat = Vec::<Edge>::new();
         let mut i0_map = HashMap::<usize, HashSet<usize>>::new();
         let mut i1_map = HashMap::<usize, HashSet<usize>>::new();
         for track in tracks {
-            let layer = track.layer.id;
-            // only first layer for now TODO add multilayer support
-            if layer != firstlayer {
-                continue;
-            }
-            // net
+            let layer = *self.layer_map.get(&track.layer.id).unwrap();
             let netname = &track.net.as_ref().unwrap().name;
             let net;
             match self.net_map.get(netname) {
@@ -393,8 +366,8 @@ impl Data {
             }
 
             let w = conv_nm!(track.width_nm.unwrap());
-            let point0 = conv_point!(track.start_nm, 0.5 * w, net);
-            let point1 = conv_point!(track.end_nm, 0.5 * w, net);
+            let point0 = conv_point!(track.start_nm, 0.5 * w, net, layer);
+            let point1 = conv_point!(track.end_nm, 0.5 * w, net, layer);
             let l0 = (point1.pos - point0.pos).length();
 
             let i0 = self.add_point(point0);
@@ -545,10 +518,15 @@ impl Data {
             println!("{:#?}", self.curves);
         }
 
-        for _ in 0..self.net_map.len() {
+        for layer in 0..self.layer_map.len() {
             self.net_trees
-                .push(QuadTree::<Point, PointNodeData>::new(root_pos, root_rad));
+                .push(Vec::<QuadTree<Point, PointNodeData>>::new());
+            for _ in 0..self.net_map.len() {
+                self.net_trees[layer]
+                    .push(QuadTree::<Point, PointNodeData>::new(root_pos, root_rad));
+            }
         }
+
         self.points_to_back();
 
         self.compute_neighbors();
@@ -558,8 +536,7 @@ impl Data {
         /*
          */
         self.sort_points();
-        //self.sort_edges();
-        self.rebuild_tree();
+        self.rebuild_trees();
         self.rebuild_net_trees();
         self.points_to_back();
 
@@ -567,9 +544,13 @@ impl Data {
     }
 
     fn send(&self, tx: &Sender<Snapshot>) {
-        let tree = if self.debug { self.tree.clone() } else { None };
-        let (center, radius) = if let Some(x) = tree.as_ref() {
-            (x.get_pos(), x.get_rad())
+        let trees = if self.debug {
+            self.trees.clone()
+        } else {
+            Vec::<QuadTree<Point, PointNodeData>>::new()
+        };
+        let (center, radius) = if !trees.is_empty() {
+            (trees[0].get_pos(), trees[0].get_rad())
         } else {
             (vec2!(0.0, 0.0), 1.0)
         };
@@ -579,7 +560,7 @@ impl Data {
             radius,
             points: self.points.clone(),
             curves: self.curves.clone(),
-            tree,
+            trees,
             new: true,
         };
         let _ = tx.send(snapshot);
@@ -587,13 +568,14 @@ impl Data {
 
     fn resample(&mut self, points_buf: &mut Vec<Point>, curves_buf: &mut Vec<Vec<Edge>>) {
         const ASPECT: f32 = 2.0;
-        const UNSUB_MAX_ANGLE: f32 = 20.0;
+        const UNSUB_MAX_ANGLE: f32 = 10.0;
 
         // move points and edges to back buffer, write resampled to front
         std::mem::swap(&mut self.points, points_buf);
         std::mem::swap(&mut self.curves, curves_buf);
         self.points.clear();
         self.curves.clear();
+        self.trees.iter_mut().for_each(|t| t.clear());
 
         let mut i0;
         let mut i1;
@@ -602,17 +584,17 @@ impl Data {
             if curve_read.is_empty() {
                 continue;
             }
+            let layer = points_buf[curve_read[0].i0].layer;
             // first point
-            i0 = if let Some((j, _)) = self
-                .points
-                .iter()
-                .enumerate()
-                .find(|(_, x)| x.pos == points_buf[curve_read[0].i0].pos)
+            i0 = if let Some(j) =
+                self.trees[layer].find_item(&self.points, points_buf[curve_read[0].i0].pos)
             {
-                j
+                j.as_usize()
             } else {
+                let j = self.points.len();
                 self.points.push(points_buf[curve_read[0].i0].clone());
-                self.points.len() - 1
+                self.trees[layer].insert_item(None, &self.points, j);
+                j
             };
             let mut l0 = 0.0;
             let mut unsubdivide = false;
@@ -638,10 +620,10 @@ impl Data {
                     && points_buf[edge.i1].neighbors == 2
                     && edge.w == next_w
                     && {
-                        // angle
                         let p0 = points_buf[edge.i0].pos;
                         let p1 = points_buf[edge.i1].pos;
                         let p2 = points_buf[curve_read[i + 1].i1].pos;
+                        // angle
                         (p0 - p1).angle_to(p2 - p1) < UNSUB_MAX_ANGLE * 180.0 / PI
                     }
                 {
@@ -655,27 +637,27 @@ impl Data {
                     let p1 = points_buf[edge.i1].pos;
                     let net = points_buf[edge.i0].net;
                     l0 *= 0.5;
-                    let mut point = point!(0.5 * (p1 + p0), 0.5 * w, net);
+                    let mut point = point!(0.5 * (p1 + p0), 0.5 * w, net, layer);
                     point.set_neighbors(2);
                     i1 = self.points.len();
                     self.points.push(point);
+                    self.trees[layer].insert_item(None, &self.points, i1);
                     curve_write.push(edge!(i0, i1, w, l0));
                     i0 = i1;
                 }
 
                 unsubdivide = false;
                 i1 = if (i == curve_read.len() - 1 || points_buf[edge.i1].neighbors > 1)
-                    && let Some((j, _)) = self
-                        .points
-                        .iter()
-                        .enumerate()
-                        .find(|(_, x)| x.pos == points_buf[curve_read[i].i1].pos)
+                    && let Some(j) =
+                        self.trees[layer].find_item(&self.points, points_buf[edge.i1].pos)
                 {
-                    j
+                    j.as_usize()
                 } else {
                     let point = points_buf[edge.i1].clone();
+                    let j = self.points.len();
                     self.points.push(point);
-                    self.points.len() - 1
+                    self.trees[layer].insert_item(None, &self.points, j);
+                    j
                 };
                 curve_write.push(edge!(i0, i1, w, l0));
                 i0 = i1;
@@ -693,13 +675,26 @@ impl Data {
 
     fn compute_force(
         &self,
-        stack: &mut Vec<(Idx<Node<PointNodeData>>, f32)>,
+        //stack: &mut Vec<(Idx<Node<PointNodeData>>, f32)>,
         index: usize,
         degree: u32,
         self_repulsion: bool,
     ) -> Vec2 {
         let pos = self.points[index].pos;
         let net = self.points[index].net;
+        let layer = self.points[index].layer;
+        let mut stack = Vec::<(Idx<Node<PointNodeData>>, f32)>::new();
+
+        let f = |delta: Vec2, rad2: f32, distsq: f32| {
+            let distsq = distsq.max(MIN_DIST);
+            let divisor = if (degree + 1).is_multiple_of(2) {
+                powu(distsq, (degree + 1) >> 1)
+            } else {
+                let dist = distsq.sqrt();
+                powu(dist, degree + 1)
+            };
+            rad2 * delta / divisor
+        };
 
         let mut calc = |tree: &QuadTree<Point, PointNodeData>| -> Vec2 {
             let mut force = Vec2::ZERO;
@@ -713,14 +708,7 @@ impl Data {
                 };
 
                 if rad * rad / distsq < METRIC * METRIC {
-                    let distsq = distsq.max(MIN_DIST);
-                    let divisor = if (degree + 1).is_multiple_of(2) {
-                        distsq.powi(((degree + 1) >> 1) as i32)
-                    } else {
-                        let dist = distsq.sqrt();
-                        dist.powi((degree + 1) as i32)
-                    };
-                    force += tree.nodes[node].data.rad * delta / divisor;
+                    force += f(delta, tree.nodes[node].data.rad, distsq);
                 } else {
                     if tree.nodes[node].is_leaf {
                         let offset = tree.nodes[node].items;
@@ -731,15 +719,7 @@ impl Data {
                             if distsq == 0.0 {
                                 continue;
                             };
-                            let distsq = distsq.max(MIN_DIST);
-                            let divisor = if (degree + 1).is_multiple_of(2) {
-                                distsq.powi(((degree + 1) >> 1) as i32)
-                            } else {
-                                let dist = distsq.sqrt();
-                                dist.powi((degree + 1) as i32)
-                            };
-
-                            force += self.points[*j].rad * delta / divisor;
+                            force += f(delta, self.points[*j].rad, distsq);
                         }
                     } else {
                         for child in tree.nodes[node]
@@ -755,26 +735,28 @@ impl Data {
             force
         };
         let mass = self.points[index].rad;
-        let all = calc(self.tree.as_ref().unwrap());
+        let all = calc(&self.trees[layer]);
         let same = if self_repulsion {
             Vec2::ZERO
         } else {
-            calc(&self.net_trees[net])
+            calc(&self.net_trees[layer][net])
         };
         mass * (all - same)
     }
 
     fn collide_edge(
         &mut self,
-        stack: &mut Vec<Idx<Node<PointNodeData>>>,
         curve_index: usize,
         edge_index: usize,
         elasticity: f32,
         self_collision: bool,
     ) {
+        let mut stack = Vec::<Idx<Node<PointNodeData>>>::new();
+
         let i0 = self.curves[curve_index][edge_index].i0;
         let i1 = self.curves[curve_index][edge_index].i1;
         let net = self.points[self.curves[curve_index][edge_index].i0].net;
+        let layer = self.points[self.curves[curve_index][edge_index].i0].layer;
         let mut p0 = self.points[i0].pos;
         let mut p1 = self.points[i1].pos;
         let rad = 0.5 * self.curves[curve_index][edge_index].w;
@@ -782,7 +764,7 @@ impl Data {
 
         self.curves[curve_index][edge_index].mark = false;
 
-        let tree = self.tree.as_ref().unwrap();
+        let tree = &mut self.trees[layer];
         stack.clear();
         stack.push(tree.root);
         while let Some(node) = stack.pop() {
@@ -865,8 +847,6 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
     let mut paused = false;
     let delta = 0.05;
 
-    let mut force_stack = Vec::<(Idx<Node<PointNodeData>>, f32)>::new();
-    let mut collision_stack = Vec::<Idx<Node<PointNodeData>>>::new();
     let mut sim_settings = SimSettings::new();
 
     let mut points_buf = Vec::<Point>::new();
@@ -904,38 +884,51 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
             if data.iterations.is_multiple_of(8) {
                 data.resample(&mut points_buf, &mut edges_buf);
                 data.sort_points();
-                data.rebuild_tree();
+                data.rebuild_trees();
                 data.rebuild_net_trees();
                 data.points_to_back();
             }
 
             // apply forces
             let k = 2.0;
-            for i in 0..data.points.len() {
-                data.points[i].f = data.compute_force(
-                    &mut force_stack,
-                    i,
-                    sim_settings.repulsion_degree,
-                    sim_settings.self_repulsion,
-                ) * k
-                    * sim_settings.noodliness;
-            }
+            let mut forces = vec![Vec2::ZERO; data.points.len()];
+            forces
+                .par_chunks_mut(PARALLEL_CHUNK_SIZE)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    chunk.iter_mut().enumerate().for_each(|(i, f)| {
+                        *f = data.compute_force(
+                            //&mut force_stack,
+                            PARALLEL_CHUNK_SIZE * chunk_idx + i,
+                            sim_settings.repulsion_degree,
+                            sim_settings.self_repulsion,
+                        ) * k
+                            * sim_settings.noodliness;
+                    });
+                });
+
             for edge in data.curves.iter().flatten() {
-                edge.apply_tension(&mut data.points, k * (1.0 - sim_settings.noodliness));
+                edge.apply_tension(
+                    &data.points,
+                    &mut forces,
+                    k * (1.0 - sim_settings.noodliness),
+                );
             }
 
             // integrate
             if sim_settings.limit_step {
-                for i in 0..data.points.len() {
-                    data.points[i].step_clamped(delta, data.min_rad);
-                }
+                data.points
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(i, pt)| pt.step_force_clamped(forces[i], delta, data.min_rad));
             } else {
-                for i in 0..data.points.len() {
-                    data.points[i].step(delta);
-                }
+                data.points
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(i, pt)| pt.step_force(forces[i], delta));
             }
 
-            data.rebuild_tree();
+            data.rebuild_trees();
             data.rebuild_net_trees();
 
             // collide
@@ -943,7 +936,6 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
                 for i in 0..data.curves.len() {
                     for j in 0..data.curves[i].len() {
                         data.collide_edge(
-                            &mut collision_stack,
                             i,
                             j,
                             sim_settings.collision_elasticity,

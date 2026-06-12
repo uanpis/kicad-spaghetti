@@ -11,10 +11,10 @@ pub struct Point {
     pub pos: Vec2,
     pub pos_prev: Vec2,
     pub v: Vec2,
-    pub f: Vec2,
 
     pub rad: f32,
     pub net: usize,
+    pub layer: usize,
     pub neighbors: u32,
 }
 
@@ -45,32 +45,30 @@ pub struct AABB {
 }
 
 impl Point {
-    pub fn new(v: Vec2, m: f32, net: usize) -> Self {
+    pub fn new(pos: Vec2, rad: f32, net: usize, layer: usize) -> Self {
         Self {
-            pos: v,
-            pos_prev: v,
-            rad: m,
+            pos,
+            pos_prev: pos,
+            rad,
             net,
+            layer,
             v: Vec2::ZERO,
-            f: Vec2::ZERO,
             neighbors: 0,
         }
     }
 
-    pub fn step(&mut self, delta: f32) {
+    pub fn step_force(&mut self, force: Vec2, delta: f32) {
         if self.neighbors > 1 {
-            self.v += self.f * delta;
+            self.v += force * delta;
             self.pos += self.v * delta;
         }
-        self.f = Vec2::ZERO;
     }
 
-    pub fn step_clamped(&mut self, delta: f32, clamp_length: f32) {
+    pub fn step_force_clamped(&mut self, force: Vec2, delta: f32, clamp_length: f32) {
         if self.neighbors > 1 {
-            self.v += self.f * delta;
+            self.v += force * delta;
             self.pos += (self.v * delta).clamp_length_max(clamp_length);
         }
-        self.f = Vec2::ZERO;
     }
 
     pub fn set_neighbors(&mut self, neighbors: u32) {
@@ -83,10 +81,6 @@ impl Point {
 
     pub fn update_velocity(&mut self, delta: f32) {
         self.v = (self.pos - self.pos_prev) / delta;
-    }
-
-    pub fn apply_force(&mut self, force: Vec2) {
-        self.f += force;
     }
 }
 
@@ -123,12 +117,12 @@ impl Edge {
         (points[self.i0].pos - points[self.i1].pos).length()
     }
 
-    pub fn apply_tension(&self, pts: &mut [Point], coef: f32) {
+    pub fn apply_tension(&self, pts: &[Point], forces: &mut [Vec2], coef: f32) {
         let delta = pts[self.i1].pos - pts[self.i0].pos;
         let force = coef * delta / self.l0;
         if !force.is_nan() {
-            pts[self.i0].apply_force(force);
-            pts[self.i1].apply_force(-force);
+            forces[self.i0] += force;
+            forces[self.i1] -= force;
         }
     }
 }
@@ -312,11 +306,11 @@ macro_rules! vec2 {
     };
 }
 macro_rules! point {
-    ($x:expr, $y:expr, $r:expr, $n:expr) => {
-        Point::new(vec2![$x, $y], $r, $n)
+    ($x:expr, $y:expr, $rad:expr, $net:expr, $layer: expr) => {
+        Point::new(vec2![$x, $y], $rad, $net, $layer)
     };
-    ($v:expr, $r:expr, $n:expr) => {
-        Point::new($v, $r, $n)
+    ($pos:expr, $rad:expr, $net:expr, $layer:expr) => {
+        Point::new($pos, $rad, $net, $layer)
     };
 }
 macro_rules! edge {

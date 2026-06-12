@@ -151,7 +151,7 @@ impl<T: QTreeItem, D: QTreeData<T, D> + Clone> QuadTree<T, D> {
         }
     }
 
-    pub fn insert_item(&mut self, node_index: Option<Idx<Node<D>>>, items: &mut [T], index: usize) {
+    pub fn insert_item(&mut self, node_index: Option<Idx<Node<D>>>, items: &[T], index: usize) {
         let index = idx::<T>(index);
         let item_pos = items[index].get_pos();
 
