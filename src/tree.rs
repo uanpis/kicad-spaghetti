@@ -23,11 +23,12 @@ pub trait QTreeData<T, D> {
         nodes: &mut [Node<D>],
         leaf_items: &[Idx<T>],
         items: &[T],
+        clearance: &[f32],
     );
     fn update_internal(self_idx: Idx<Node<D>>, nodes: &mut [Node<D>]);
 }
 
-pub trait QTreeItem {
+pub trait HasPos {
     fn get_pos(&self) -> Vec2;
 }
 
@@ -70,7 +71,7 @@ impl<D: Clone> std::clone::Clone for Node<D> {
     }
 }
 
-impl<T: QTreeItem, D: QTreeData<T, D> + Clone> QuadTree<T, D> {
+impl<T: HasPos, D: QTreeData<T, D> + Clone> QuadTree<T, D> {
     pub fn new(pos: Vec2, rad: f32) -> Self {
         let leaf_items = vec![Idx::<T>::ZERO; BUCKET_SIZE];
         let root_node = Node::<D> {
@@ -239,12 +240,12 @@ impl<T: QTreeItem, D: QTreeData<T, D> + Clone> QuadTree<T, D> {
         x
     }
 
-    pub fn update_bottom_up(&mut self, items: &[T]) {
+    pub fn update_bottom_up(&mut self, items: &[T], clearance: &[f32]) {
         for i in (0..self.nodes.len()).rev() {
             let i = idx::<Node<D>>(i);
             let node = &mut self.nodes[i];
             if node.is_leaf {
-                D::update_leaf(i, &mut self.nodes, &self.leaf_items, items);
+                D::update_leaf(i, &mut self.nodes, &self.leaf_items, items, clearance);
             } else {
                 D::update_internal(i, &mut self.nodes);
             }

@@ -1,8 +1,10 @@
 use crate::draw::*;
 use crate::gui::EguiRenderer;
 use crate::sim::Sim;
+use crate::utils::*;
 use egui_wgpu::{ScreenDescriptor, wgpu};
-use std::sync::Arc;
+use glam::Vec2;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use wgpu::CurrentSurfaceTexture;
 use winit::{
@@ -16,8 +18,8 @@ use winit::{
 
 pub struct AppState {
     pub sim: Sim,
-    pub draw2d: Draw2D,
-    pub leftpanel: bool,
+    pub draw2d: Arc<Mutex<Draw2D>>,
+    pub rightpanel: bool,
 
     pub paused: bool,
     pub fps: f32,
@@ -28,7 +30,10 @@ pub struct AppState {
     pub queue: wgpu::Queue,
     pub surface_config: wgpu::SurfaceConfiguration,
     pub surface: wgpu::Surface<'static>,
-    pub scale_factor: f32,
+    pub scale_factor: F32Resettable,
+
+    pub zoom: f32,
+    pub pan: Vec2,
 }
 
 impl AppState {
@@ -83,10 +88,13 @@ impl AppState {
 
         surface.configure(&device, &surface_config);
 
-        let scale_factor = 1.0;
-
         let sim = Sim::new();
-        let draw2d = Draw2D::new(&device, &queue, selected_format, &sim.snapshot);
+        let draw2d = Arc::new(Mutex::new(Draw2D::new(
+            &device,
+            &queue,
+            selected_format,
+            &sim.snapshot,
+        )));
 
         let time = Instant::now();
 
@@ -94,7 +102,7 @@ impl AppState {
             sim,
             draw2d,
 
-            leftpanel: true,
+            rightpanel: true,
             paused: false,
             fps: 0.0,
             time,
@@ -104,7 +112,10 @@ impl AppState {
             queue,
             surface,
             surface_config,
-            scale_factor,
+            scale_factor: 1.0.into(),
+
+            zoom: 1.0,
+            pan: Vec2::ZERO,
         }
     }
 
@@ -112,33 +123,23 @@ impl AppState {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-        let z: f32 = 2.0 / self.sim.snapshot.radius;
-        self.draw2d.update_globals(
-            &self.queue,
-            GpuGlobals {
-                zoom: [z, z],
-                pan: [-self.sim.snapshot.center.x, -self.sim.snapshot.center.y],
-                aspect_ratio: self.surface_config.width as f32 / self.surface_config.height as f32,
-                _pad: 0.0,
-            },
-        )
     }
 
     fn update_geom(&mut self) {
         let snapshot = self.sim.get_snapshot();
         if snapshot.new {
             snapshot.new = false;
-
-            self.draw2d.rebuild(&self.device, &self.queue, snapshot);
             let z: f32 = 2.0 / snapshot.radius;
-            self.draw2d.update_globals(
+            let zoom = z * self.zoom;
+            let pan = self.pan / z - snapshot.center;
+            let mut draw2d = self.draw2d.lock().unwrap();
+            draw2d.rebuild(&self.device, &self.queue, snapshot);
+            draw2d.update_globals(
                 &self.queue,
                 GpuGlobals {
-                    zoom: [z, z],
-                    pan: [-snapshot.center.x, -snapshot.center.y],
-                    aspect_ratio: self.surface_config.width as f32
-                        / self.surface_config.height as f32,
-                    _pad: 0.0,
+                    zoom,
+                    pan: pan.into(),
+                    _pad: 0,
                 },
             )
         }
@@ -181,8 +182,8 @@ impl App {
             .create_surface(window.clone())
             .expect("Failed to create surface!");
 
-        let state = AppState::new(&self.instance, surface, initial_width, initial_width).await;
-        let egui_renderer = EguiRenderer::new(&state.device, state.surface_config.format, &window);
+        let mut state = AppState::new(&self.instance, surface, initial_width, initial_width).await;
+        let egui_renderer = EguiRenderer::new(&mut state, &window);
 
         self.window.get_or_insert(window);
         self.state.get_or_insert(state);
@@ -197,76 +198,29 @@ impl App {
 
     fn handle_redraw(&mut self) {
         let state = self.state.as_mut().unwrap();
+        state.update_geom();
 
         let screen_descriptor = ScreenDescriptor {
             size_in_pixels: [state.surface_config.width, state.surface_config.height],
             pixels_per_point: self.window.as_ref().unwrap().scale_factor() as f32
-                * state.scale_factor,
+                * state.scale_factor.get(),
         };
-
         let surface_texture = match state.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => texture,
-            CurrentSurfaceTexture::Suboptimal(texture) => {
-                // optionally handle suboptimal
-                texture
-            }
-            CurrentSurfaceTexture::Outdated => {
-                // Ignoring outdated to allow resizing and minimization
-                println!("wgpu surface outdated");
-                return;
-            }
+            CurrentSurfaceTexture::Suboptimal(texture) => texture,
             _ => {
                 return;
             }
         };
 
-        let surface_view = surface_texture
+        let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-
         let mut encoder = state
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        {
-            state.update_geom();
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-
-            if state.draw2d.instance_count > 0 {
-                pass.set_pipeline(&state.draw2d.pipeline);
-                pass.set_bind_group(0, &state.draw2d.bind_group, &[]);
-                pass.set_vertex_buffer(0, state.draw2d.quad_vbo.slice(..));
-                pass.set_vertex_buffer(1, state.draw2d.instance_buffer.slice(..));
-                pass.draw(0..6, 0..state.draw2d.instance_count);
-            }
-            if state.draw2d.circle_instance_count > 0 {
-                pass.set_pipeline(&state.draw2d.circle_pipeline);
-                pass.set_bind_group(0, &state.draw2d.bind_group, &[]);
-                pass.set_vertex_buffer(0, state.draw2d.quad_vbo.slice(..));
-                pass.set_vertex_buffer(1, state.draw2d.circle_instance_buf.slice(..));
-                pass.draw(0..6, 0..state.draw2d.circle_instance_count);
-            }
-            /*
-             */
-            if state.draw2d.render_settings.debug && state.draw2d.debug_vertex_count > 0 {
-                pass.set_pipeline(&state.draw2d.debug_pipeline);
-                pass.set_bind_group(0, &state.draw2d.bind_group, &[]);
-                pass.set_vertex_buffer(0, state.draw2d.debug_vbo.slice(..));
-                pass.draw(0..state.draw2d.debug_vertex_count, 0..1);
-            }
-        }
+        //state.draw2d.render_to_texture(&mut encoder, &texture_view);
 
         let window = self.window.as_ref().unwrap();
         {
@@ -278,7 +232,7 @@ impl App {
                 &state.queue,
                 &mut encoder,
                 window,
-                &surface_view,
+                &texture_view,
                 screen_descriptor,
             );
         }

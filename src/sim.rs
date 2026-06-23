@@ -1,10 +1,13 @@
 use crate::physics::*;
-use crate::tree::{Node, QTreeItem, QuadTree};
+use crate::tree::{Node, QuadTree};
 use crate::typed_idx::Idx;
 use crate::utils::*;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use glam::Vec2;
-use kicad_ipc_rs::{KiCadClientBlocking, KiCadError, model::board::PcbItem};
+use kicad_ipc_rs::{
+    KiCadClientBlocking, KiCadError,
+    model::{board::PcbItem, common::PcbObjectTypeCode},
+};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::*;
@@ -20,47 +23,54 @@ pub enum Command {
     UpdateSettings(SimSettings),
 }
 
+pub enum Response {
+    Snapshot(Snapshot),
+}
+
 const PARALLEL_CHUNK_SIZE: usize = 256;
-const SCALING_FACTOR: f32 = 1e-6f32; // nm -> mm
 const METRIC: f32 = 0.5;
 const MIN_DIST: f32 = 0.05;
 
 #[derive(Clone)]
 pub struct SimSettings {
-    pub damping: f32,
-    pub noodliness: f32,
+    pub damping: F32Resettable,
+    pub noodliness: F32Resettable,
 
-    pub repulsion_degree: u32,
-    pub self_repulsion: bool,
+    pub segment_size: F32Resettable,
 
-    pub collision_elasticity: f32,
-    pub collision_iterations: usize,
-    pub self_collision: bool,
+    pub repulsion_degree: U32Resettable,
+    pub self_repulsion: BoolResettable,
 
-    pub limit_step: bool,
+    pub collision_elasticity: F32Resettable,
+    pub collision_iterations: UsizeResettable,
+    pub self_collision: BoolResettable,
+
+    pub limit_step: BoolResettable,
 }
 
 impl SimSettings {
     fn new() -> Self {
         Self {
-            damping: 1.0,
-            noodliness: 0.5,
+            damping: 1.0.into(),
+            noodliness: 0.5.into(),
 
-            repulsion_degree: 3,
-            self_repulsion: true,
+            segment_size: 3.0.into(),
 
-            collision_elasticity: 0.5,
-            collision_iterations: 3,
-            self_collision: false,
+            repulsion_degree: 3.into(),
+            self_repulsion: false.into(),
 
-            limit_step: true,
+            collision_elasticity: 0.5.into(),
+            collision_iterations: 1.into(),
+            self_collision: false.into(),
+
+            limit_step: true.into(),
         }
     }
 }
 
 pub struct Sim {
     tx: Sender<Command>,
-    rx: Receiver<Snapshot>,
+    rx: Receiver<Response>,
     pub sim_settings: SimSettings,
     pub snapshot: Snapshot,
     handle: Option<thread::JoinHandle<()>>,
@@ -69,7 +79,7 @@ pub struct Sim {
 impl Sim {
     pub fn new() -> Self {
         let (tx, _rx) = unbounded::<Command>();
-        let (_tx, rx) = bounded::<Snapshot>(1);
+        let (_tx, rx) = bounded::<Response>(1);
         let handle = thread::spawn(move || {
             //set_current_thread_priority(ThreadPriority::Min).unwrap();
             sim_loop(_rx, _tx);
@@ -86,7 +96,7 @@ impl Sim {
     }
 
     pub fn get_snapshot(&mut self) -> &mut Snapshot {
-        if let Ok(s) = self.rx.try_recv() {
+        if let Ok(Response::Snapshot(s)) = self.rx.try_recv() {
             self.snapshot = s;
         }
         self.snapshot.get()
@@ -128,23 +138,39 @@ pub struct Snapshot {
     pub iterations: u64,
     pub center: Vec2,
     pub radius: f32,
+    pub net_map: HashMap<String, usize>,
+    pub layer_map: HashMap<i32, usize>,
     pub points: Vec<Point>,
+    pub footprints: Vec<Footprint>,
+    pub vias: Vec<Via>,
     pub curves: Vec<Vec<Edge>>,
+    pub polygons: Vec<Polygon>,
     pub trees: Vec<QuadTree<Point, PointNodeData>>,
     pub new: bool,
 }
 
 impl Snapshot {
     pub fn new() -> Self {
-        let points = Vec::<Point>::new();
-        let curves = Vec::<Vec<Edge>>::new();
+        let net_map = HashMap::new();
+        let layer_map = HashMap::new();
+        let points = Vec::new();
+        let curves = Vec::new();
+        let polygons = Vec::new();
+        let footprints = Vec::new();
+        let vias = Vec::new();
+        let trees = Vec::new();
         Self {
             iterations: 0,
             center: Vec2::ZERO,
             radius: 0.0,
+            net_map,
+            layer_map,
             points,
             curves,
-            trees: Vec::<QuadTree<Point, PointNodeData>>::new(),
+            polygons,
+            footprints,
+            vias,
+            trees,
             new: true,
         }
     }
@@ -154,50 +180,68 @@ impl Snapshot {
     }
 }
 
-struct Data {
-    debug: bool,
-    iterations: u64,
-    kicad_client: KiCadClientBlocking,
+pub struct Data {
+    pub debug: bool,
+    pub iterations: u64,
+    pub kicad_client: KiCadClientBlocking,
 
-    net_map: HashMap<String, usize>,
-    layer_map: HashMap<i32, usize>,
+    pub net_clearance: Vec<f32>,
+    pub net_map: HashMap<String, usize>,
+    pub layer_map: HashMap<i32, usize>,
 
-    points: Vec<Point>,
-    curves: Vec<Vec<Edge>>,
+    pub points: Vec<Point>,
+    pub curves: Vec<Vec<Edge>>,
+    pub polygons: Vec<Polygon>,
+    pub footprints: Vec<Footprint>,
+    pub vias: Vec<Via>,
 
-    trees: Vec<QuadTree<Point, PointNodeData>>,
-    net_trees: Vec<Vec<QuadTree<Point, PointNodeData>>>,
+    pub trees: Vec<QuadTree<Point, PointNodeData>>,
+    pub net_trees: Vec<Vec<QuadTree<Point, PointNodeData>>>,
 
-    min_rad: f32,
+    pub min_rad: f32,
 }
 
 impl Data {
     fn new(debug: bool) -> Self {
         // TODO handle no kicad
         let kicad_client = KiCadClientBlocking::connect().expect("Could not connect to KiCad");
+
+        let net_clearance = Vec::<f32>::new();
         let net_map = HashMap::new();
         let layer_map = HashMap::new();
+
         let points = Vec::<Point>::new();
         let curves = Vec::<Vec<Edge>>::new();
+        let polygons = Vec::new();
+        let footprints = Vec::<Footprint>::new();
+        let vias = Vec::<Via>::new();
+
         let trees = Vec::<QuadTree<Point, PointNodeData>>::new();
         let net_trees = Vec::<Vec<QuadTree<Point, PointNodeData>>>::new();
         Self {
             debug,
             iterations: 0,
             kicad_client,
+
+            net_clearance,
             net_map,
             layer_map,
+
             points,
             curves,
+            polygons,
+            footprints,
+            vias,
+
             trees,
             net_trees,
             min_rad: f32::INFINITY,
         }
     }
 
-    fn points_to_back(&mut self) {
-        // TODO parallel
+    fn store_prev(&mut self) {
         self.points.iter_mut().for_each(|p| p.store_prev());
+        self.vias.iter_mut().for_each(|v| v.store_prev());
     }
 
     fn rebuild_trees(&mut self) {
@@ -206,10 +250,10 @@ impl Data {
         }
         for i in 0..self.points.len() {
             let layer = self.points[i].layer;
-            self.trees[layer].insert_item(None, &mut self.points, i);
+            self.trees[layer].insert_item(None, &self.points, i);
         }
         for layer in 0..self.layer_map.len() {
-            self.trees[layer].update_bottom_up(&self.points);
+            self.trees[layer].update_bottom_up(&self.points, &self.net_clearance);
         }
     }
 
@@ -222,24 +266,25 @@ impl Data {
         for i in 0..self.points.len() {
             let net = self.points[i].net;
             let layer = self.points[i].layer;
-            self.net_trees[layer][net].insert_item(None, &mut self.points, i);
+            self.net_trees[layer][net].insert_item(None, &self.points, i);
         }
         for layer in 0..self.layer_map.len() {
             for net in 0..self.net_map.len() {
-                self.net_trees[layer][net].update_bottom_up(&self.points);
+                self.net_trees[layer][net].update_bottom_up(&self.points, &self.net_clearance);
             }
         }
     }
 
-    fn add_point(&mut self, point: Point) -> usize {
+    fn find_or_add_point(&mut self, point: Point) -> usize {
         let layer = point.layer;
-        if let Some(i) = self.trees[layer].find_item(&self.points, point.get_pos()) {
-            self.points[i].rad = self.points[i].rad.max(point.rad);
+        if let Some(i) = self.trees[layer].find_item(&self.points, point.pos) {
+            let rad = self.points[i].rad.max(point.rad);
+            self.points[i].rad = rad;
             i.as_usize()
         } else {
             self.points.push(point);
             let i = self.points.len() - 1;
-            self.trees[layer].insert_item(None, &mut self.points, i);
+            self.trees[layer].insert_item(None, &self.points, i);
             i
         }
     }
@@ -276,11 +321,33 @@ impl Data {
             edge.i0 = inverse[edge.i0];
             edge.i1 = inverse[edge.i1];
         }
+        for index in self
+            .footprints
+            .iter_mut()
+            .flat_map(|fp| fp.attached_points.iter_mut())
+        {
+            *index = inverse[*index];
+        }
+        for index in self
+            .vias
+            .iter_mut()
+            .flat_map(|fp| fp.attached_points.iter_mut())
+        {
+            *index = inverse[*index];
+        }
+        for polygon in self.polygons.iter_mut() {
+            for pt in polygon.points.iter_mut() {
+                *pt = inverse[*pt];
+            }
+        }
     }
 
-    fn import(&mut self) -> Result<(), KiCadError> {
-        let items = self.kicad_client.get_items_by_type_codes(vec![11])?;
-        //println!("{:#?}", tracks);
+    fn import(&mut self, sim_settings: &SimSettings) -> Result<(), KiCadError> {
+        let items = self.kicad_client.get_items_by_type_codes(vec![
+            PcbObjectTypeCode::new_trace().code,
+            PcbObjectTypeCode::new_footprint_instance().code,
+            PcbObjectTypeCode::new_via().code,
+        ])?;
 
         let tracks: Vec<_> = items
             .iter()
@@ -304,25 +371,9 @@ impl Data {
                 self.layer_map.insert(stackuplayer.layer.id, n);
             });
 
-        macro_rules! conv_nm {
-            ($x:expr) => {
-                SCALING_FACTOR * $x as f32
-            };
-        }
-        macro_rules! conv_vec {
-            ($v:expr) => {
-                vec2!(conv_nm!($v.unwrap().x_nm), conv_nm!($v.unwrap().y_nm))
-            };
-        }
-        macro_rules! conv_point {
-            ($pos:expr, $rad:expr, $net:expr, $layer:expr) => {
-                point!(conv_vec!($pos), $rad, $net, $layer)
-            };
-        }
-
         let pts: Vec<_> = tracks
             .iter()
-            .flat_map(|t| [conv_vec!(t.start_nm), conv_vec!(t.end_nm)])
+            .flat_map(|t| [t.start_nm.unwrap().to_mm(), t.end_nm.unwrap().to_mm()])
             .collect();
 
         // Get bounds
@@ -347,31 +398,29 @@ impl Data {
                 .push(QuadTree::<Point, PointNodeData>::new(root_pos, root_rad));
         }
 
-        // build unsorted flat vector of edges
+        // build unsorted flat vector of edges, merging duplicate points
         let mut edges_flat = Vec::<Edge>::new();
         let mut i0_map = HashMap::<usize, HashSet<usize>>::new();
         let mut i1_map = HashMap::<usize, HashSet<usize>>::new();
         for track in tracks {
             let layer = *self.layer_map.get(&track.layer.id).unwrap();
             let netname = &track.net.as_ref().unwrap().name;
-            let net;
-            match self.net_map.get(netname) {
-                Some(n) => {
-                    net = *n;
-                }
+            let net = match self.net_map.get(netname) {
+                Some(n) => *n,
                 None => {
-                    net = self.net_map.len();
-                    self.net_map.insert(netname.clone(), net);
+                    let n = self.net_map.len();
+                    self.net_map.insert(netname.clone(), n);
+                    n
                 }
-            }
+            };
 
-            let w = conv_nm!(track.width_nm.unwrap());
-            let point0 = conv_point!(track.start_nm, 0.5 * w, net, layer);
-            let point1 = conv_point!(track.end_nm, 0.5 * w, net, layer);
+            let w = track.width_nm.unwrap().to_mm();
+            let point0 = Point::new_free(track.start_nm.unwrap().to_mm(), 0.5 * w, net, layer);
+            let point1 = Point::new_free(track.end_nm.unwrap().to_mm(), 0.5 * w, net, layer);
             let l0 = (point1.pos - point0.pos).length();
 
-            let i0 = self.add_point(point0);
-            let i1 = self.add_point(point1);
+            let i0 = self.find_or_add_point(point0);
+            let i1 = self.find_or_add_point(point1);
             if let Some(x) = i0_map.get_mut(&i0) {
                 x.insert(edges_flat.len());
             } else {
@@ -387,7 +436,7 @@ impl Data {
                 i1_map.insert(i1, hash_set);
             }
 
-            edges_flat.push(edge!(i0, i1, w, l0));
+            edges_flat.push(Edge::new(i0, i1, w, l0));
             self.min_rad = self.min_rad.min(0.5 * w);
         }
 
@@ -401,26 +450,7 @@ impl Data {
         let mut edge = edges_flat.swap_remove(0);
         // remove first edge from pool
         self.curves.push(Vec::<Edge>::new());
-        #[cfg(debug_assertions)]
-        let mut iterations = 0;
-        #[cfg(debug_assertions)]
-        println!("{:#?}", edges_flat);
         while !edges_flat.is_empty() || !tmp_edges.is_empty() {
-            //println!("{:#?}", self.curves);
-            #[cfg(debug_assertions)]
-            {
-                println!();
-                println!("current edge: {:?}", (edge.i0, edge.i1));
-                println!(
-                    "tmp_edges: {:?}",
-                    tmp_edges.iter().map(|x| (x.i0, x.i1)).collect::<Vec<_>>()
-                );
-                println!(
-                    "edges left to add: {:?}",
-                    edges_flat.iter().collect::<Vec<_>>()
-                );
-            }
-
             if backwards {
                 // walk backwards
                 let found_edges: Vec<(bool, usize)> = edges_flat
@@ -445,8 +475,6 @@ impl Data {
                     if swap {
                         edge.swap();
                     }
-                    #[cfg(debug_assertions)]
-                    println!("walk backward, matched edge: {:?}", index);
                     continue;
                 }
             }
@@ -460,8 +488,6 @@ impl Data {
                 edge = next;
                 if edges_flat.is_empty() && tmp_edges.is_empty() {
                     self.curves.last_mut().unwrap().push(edge);
-                    #[cfg(debug_assertions)]
-                    println!("break !!!");
                     break;
                 }
                 continue;
@@ -487,8 +513,6 @@ impl Data {
                 if swap {
                     edge.swap();
                 }
-                #[cfg(debug_assertions)]
-                println!("walk forward, matched edge: {:?}", index);
                 continue;
             }
 
@@ -498,25 +522,37 @@ impl Data {
             edge = edges_flat.swap_remove(0);
             if edges_flat.is_empty() && tmp_edges.is_empty() {
                 self.curves.last_mut().unwrap().push(edge);
-                #[cfg(debug_assertions)]
-                println!("break !!!");
                 break;
             }
+        }
 
-            #[cfg(debug_assertions)]
-            {
-                iterations += 1;
-                if iterations > 1000000 {
-                    println!("{:#?}", edges_flat);
-                    panic!("stuck in curve insertion!");
+        // add footprints
+        self.footprints = items
+            .iter()
+            .filter_map(|x| {
+                if let PcbItem::FootprintInstance(fp) = x {
+                    Some(fp)
+                } else {
+                    None
                 }
-            }
-        }
-        #[cfg(debug_assertions)]
-        {
-            println!("hello!!!!!!!!!!");
-            println!("{:#?}", self.curves);
-        }
+            })
+            .enumerate()
+            .map(|(i, x)| Footprint::from_kicad(x, self, i))
+            .collect();
+
+        // add vias
+        self.vias = items
+            .iter()
+            .filter_map(|x| {
+                if let PcbItem::Via(via) = x {
+                    Some(via)
+                } else {
+                    None
+                }
+            })
+            .enumerate()
+            .map(|(i, x)| Via::from_kicad(x, self, i))
+            .collect();
 
         for layer in 0..self.layer_map.len() {
             self.net_trees
@@ -527,30 +563,106 @@ impl Data {
             }
         }
 
-        self.points_to_back();
+        if let Ok(x) = self.kicad_client.get_netclass_for_nets(
+            self.net_map
+                .keys()
+                .map(|s| kicad_ipc_rs::model::board::BoardNet {
+                    code: 0,
+                    name: s.clone(),
+                })
+                .collect(),
+        ) {
+            self.net_clearance = x
+                .iter()
+                .map(|n| {
+                    n.net_class
+                        .board
+                        .as_ref()
+                        .unwrap()
+                        .clearance_nm
+                        .unwrap()
+                        .to_mm()
+                })
+                .collect();
+        }
+
+        self.rebuild_trees();
+
+        // find points inside via, set as children
+        for v in 0..self.vias.len() {
+            let via = &mut self.vias[v];
+            let via_pos = via.pos;
+            let mut extend = Vec::new();
+            let mut stack = Vec::new();
+            for p in via.attached_points.iter() {
+                let point = &self.points[*p];
+                let pos = point.pos;
+                let rad = point.rad;
+                let layer = point.layer;
+                let aabb = AABB::center_radius(point.pos, point.rad);
+                stack.clear();
+                stack.push(self.trees[layer].root);
+                while let Some(node) = stack.pop() {
+                    if !aabb.collide_aabb(&self.trees[layer].nodes[node].data.aabb) {
+                        continue;
+                    }
+                    if self.trees[layer].nodes[node].is_leaf {
+                        let offset = self.trees[layer].nodes[node].items;
+                        let nitems = self.trees[layer].nodes[node].nitems;
+                        for j in self.trees[layer].leaf_items[offset..offset + nitems].iter() {
+                            let point_pos = self.points[*j].pos;
+                            //let point_rad = self.points[*j].rad;
+                            if (point_pos - pos).length_squared() < rad * rad
+                                && matches!(self.points[*j].point_type, PointType::Free { .. })
+                            {
+                                self.points[*j].point_type = PointType::Child {
+                                    local_pos: point_pos - via_pos,
+                                    parent: ParentIndex::Via(v),
+                                    has_edge: true,
+                                };
+                                extend.push(j.as_usize());
+                            }
+                        }
+                    } else {
+                        for child in self.trees[layer].nodes[node]
+                            .children
+                            .iter()
+                            .filter(|x| x.as_usize() != 0usize)
+                        {
+                            stack.push(*child);
+                        }
+                    }
+                }
+            }
+            via.attached_points.extend(extend);
+        }
+
+        self.store_prev();
 
         self.compute_neighbors();
-        self.resample(&mut Vec::<Point>::new(), &mut Vec::<Vec<Edge>>::new());
-        self.resample(&mut Vec::<Point>::new(), &mut Vec::<Vec<Edge>>::new());
-        self.resample(&mut Vec::<Point>::new(), &mut Vec::<Vec<Edge>>::new());
-        /*
-         */
+        for _ in 0..6 {
+            self.resample(
+                &mut Vec::<Point>::new(),
+                &mut Vec::<Vec<Edge>>::new(),
+                sim_settings,
+            );
+        }
         self.sort_points();
         self.rebuild_trees();
         self.rebuild_net_trees();
-        self.points_to_back();
+        self.store_prev();
 
         Ok(())
     }
 
-    fn send(&self, tx: &Sender<Snapshot>) {
+    fn send(&self, tx: &Sender<Response>) {
         let trees = if self.debug {
             self.trees.clone()
         } else {
             Vec::<QuadTree<Point, PointNodeData>>::new()
         };
         let (center, radius) = if !trees.is_empty() {
-            (trees[0].get_pos(), trees[0].get_rad())
+            (trees[0].get_pos(), trees[0].rad)
         } else {
             (vec2!(0.0, 0.0), 1.0)
         };
@@ -558,16 +670,25 @@ impl Data {
             iterations: self.iterations,
             center,
             radius,
+            net_map: self.net_map.clone(),
+            layer_map: self.layer_map.clone(),
             points: self.points.clone(),
             curves: self.curves.clone(),
+            polygons: self.polygons.clone(),
+            footprints: self.footprints.clone(),
+            vias: self.vias.clone(),
             trees,
             new: true,
         };
-        let _ = tx.send(snapshot);
+        let _ = tx.send(Response::Snapshot(snapshot));
     }
 
-    fn resample(&mut self, points_buf: &mut Vec<Point>, curves_buf: &mut Vec<Vec<Edge>>) {
-        const ASPECT: f32 = 2.0;
+    fn resample(
+        &mut self,
+        points_buf: &mut Vec<Point>,
+        curves_buf: &mut Vec<Vec<Edge>>,
+        sim_settings: &SimSettings,
+    ) {
         const UNSUB_MAX_ANGLE: f32 = 10.0;
 
         // move points and edges to back buffer, write resampled to front
@@ -577,6 +698,8 @@ impl Data {
         self.curves.clear();
         self.trees.iter_mut().for_each(|t| t.clear());
 
+        let mut child_point_map = HashMap::new();
+
         let mut i0;
         let mut i1;
         for curve_read in curves_buf.iter() {
@@ -584,15 +707,17 @@ impl Data {
             if curve_read.is_empty() {
                 continue;
             }
-            let layer = points_buf[curve_read[0].i0].layer;
+            let first = &points_buf[curve_read[0].i0];
+            let layer = first.layer;
             // first point
-            i0 = if let Some(j) =
-                self.trees[layer].find_item(&self.points, points_buf[curve_read[0].i0].pos)
-            {
+            i0 = if let Some(j) = self.trees[layer].find_item(&self.points, first.pos) {
                 j.as_usize()
             } else {
                 let j = self.points.len();
-                self.points.push(points_buf[curve_read[0].i0].clone());
+                self.points.push(first.clone());
+                if matches!(first.point_type, PointType::Child { .. }) {
+                    child_point_map.insert(curve_read[0].i0, j);
+                }
                 self.trees[layer].insert_item(None, &self.points, j);
                 j
             };
@@ -612,13 +737,19 @@ impl Data {
                 }
                 l0 += edge.l0;
                 let len = edge.length(points_buf);
-                let segment_size = w * ASPECT;
+                let segment_size = w * sim_settings.segment_size.get();
+
+                let neighbors = match &points_buf[edge.i1].point_type {
+                    PointType::Free { neighbors, .. } => *neighbors,
+                    PointType::Child { .. } => 0,
+                };
 
                 // unsubdivide
-                if len < 0.5 * segment_size
+                if len < 0.33 * segment_size
                     && !unsubdivide
-                    && points_buf[edge.i1].neighbors == 2
+                    && neighbors == 2
                     && edge.w == next_w
+                    && !matches!(first.point_type, PointType::Child { .. })
                     && {
                         let p0 = points_buf[edge.i0].pos;
                         let p1 = points_buf[edge.i1].pos;
@@ -632,22 +763,22 @@ impl Data {
                 }
 
                 // subdivide
-                if len > 1.5 * segment_size && !unsubdivide {
+                if len > 2.0 * segment_size && !unsubdivide {
                     let p0 = points_buf[edge.i0].pos;
                     let p1 = points_buf[edge.i1].pos;
                     let net = points_buf[edge.i0].net;
                     l0 *= 0.5;
-                    let mut point = point!(0.5 * (p1 + p0), 0.5 * w, net, layer);
+                    let mut point = Point::new_free(0.5 * (p1 + p0), 0.5 * w, net, layer);
                     point.set_neighbors(2);
                     i1 = self.points.len();
                     self.points.push(point);
                     self.trees[layer].insert_item(None, &self.points, i1);
-                    curve_write.push(edge!(i0, i1, w, l0));
+                    curve_write.push(Edge::new(i0, i1, w, l0));
                     i0 = i1;
                 }
 
                 unsubdivide = false;
-                i1 = if (i == curve_read.len() - 1 || points_buf[edge.i1].neighbors > 1)
+                i1 = if (i == curve_read.len() - 1 || neighbors > 1)
                     && let Some(j) =
                         self.trees[layer].find_item(&self.points, points_buf[edge.i1].pos)
                 {
@@ -655,21 +786,65 @@ impl Data {
                 } else {
                     let point = points_buf[edge.i1].clone();
                     let j = self.points.len();
+                    if matches!(point.point_type, PointType::Child { .. }) {
+                        child_point_map.insert(edge.i1, j);
+                    }
                     self.points.push(point);
                     self.trees[layer].insert_item(None, &self.points, j);
                     j
                 };
-                curve_write.push(edge!(i0, i1, w, l0));
+                curve_write.push(Edge::new(i0, i1, w, l0));
                 i0 = i1;
             }
             self.curves.push(curve_write);
+        }
+        for fp in self.footprints.iter_mut() {
+            for pt in fp.attached_points.iter_mut() {
+                let i = self.points.len();
+                self.points.push(points_buf[*pt].clone());
+                *pt = i;
+            }
+        }
+        for via in self.vias.iter_mut() {
+            let mut i = 0;
+            while i < via.attached_points.len() {
+                let pt = &mut via.attached_points[i];
+                let len = self.points.len();
+                if let PointType::Child { has_edge, .. } = points_buf[*pt].point_type {
+                    if has_edge {
+                        if let Some(child) = child_point_map.get(pt) {
+                            *pt = *child
+                        } else {
+                            // TODO fix here, breaks when merging via points.
+                            via.attached_points.remove(i);
+                        }
+                    } else {
+                        self.points.push(points_buf[*pt].clone());
+                        *pt = len;
+                    }
+                }
+                i += 1;
+            }
+        }
+        for polygon in self.polygons.iter_mut() {
+            for pt in polygon.points.iter_mut() {
+                let i = self.points.len();
+                self.points.push(points_buf[*pt].clone());
+                *pt = i;
+            }
         }
     }
 
     fn compute_neighbors(&mut self) {
         for edge in self.curves.iter().flatten() {
-            self.points[edge.i0].neighbors += 1;
-            self.points[edge.i1].neighbors += 1;
+            for i in [edge.i0, edge.i1] {
+                if let PointType::Free {
+                    ref mut neighbors, ..
+                } = self.points[i].point_type
+                {
+                    *neighbors += 1;
+                }
+            }
         }
     }
 
@@ -746,6 +921,7 @@ impl Data {
 
     fn collide_edge(
         &mut self,
+        //points_buf: &mut [Point],
         curve_index: usize,
         edge_index: usize,
         elasticity: f32,
@@ -755,16 +931,41 @@ impl Data {
 
         let i0 = self.curves[curve_index][edge_index].i0;
         let i1 = self.curves[curve_index][edge_index].i1;
+
+        let parent0 = if let PointType::Child {
+            parent: parent0, ..
+        } = self.points[i0].point_type
+        {
+            parent0
+        } else {
+            ParentIndex::Via(usize::MAX)
+        };
+        let parent1 = if let PointType::Child {
+            parent: parent1, ..
+        } = self.points[i1].point_type
+        {
+            parent1
+        } else {
+            ParentIndex::Footprint(usize::MAX)
+        };
+        if parent0 == parent1 {
+            return;
+        }
+
         let net = self.points[self.curves[curve_index][edge_index].i0].net;
+        let clearance = self.net_clearance[net];
         let layer = self.points[self.curves[curve_index][edge_index].i0].layer;
         let mut p0 = self.points[i0].pos;
         let mut p1 = self.points[i1].pos;
+        let mut offset0 = Vec2::ZERO;
+        let mut offset1 = Vec2::ZERO;
         let rad = 0.5 * self.curves[curve_index][edge_index].w;
-        let mut aabb = self.curves[curve_index][edge_index].get_aabb(&self.points);
+        let mass = rad * self.curves[curve_index][edge_index].l0;
+        let mut aabb = self.curves[curve_index][edge_index].get_aabb(&self.points, clearance);
 
-        self.curves[curve_index][edge_index].mark = false;
+        //self.curves[curve_index][edge_index].mark = false;
 
-        let tree = &mut self.trees[layer];
+        let tree = &self.trees[layer];
         stack.clear();
         stack.push(tree.root);
         while let Some(node) = stack.pop() {
@@ -778,12 +979,19 @@ impl Data {
                     if j.as_usize() == i0 || j.as_usize() == i1 {
                         continue;
                     }
+                    if let PointType::Child { parent, .. } = self.points[*j].point_type
+                        && (parent == parent0 || parent == parent1)
+                    {
+                        continue;
+                    }
                     let point_net = self.points[*j].net;
                     let point_pos = self.points[*j].pos;
                     let point_rad = self.points[*j].rad;
+                    let point_clearance = self.net_clearance[point_net];
+                    let max_clearance = clearance.max(point_clearance);
                     // cheap check
                     if (point_net != net || point_rad == rad && self_collision)
-                        && aabb.collide_square(point_pos, point_rad)
+                        && aabb.collide_square(point_pos, point_rad + max_clearance)
                     {
                         let e = p1 - p0;
                         let d0 = point_pos - p0;
@@ -792,10 +1000,9 @@ impl Data {
 
                         let normal = d0 - e * t;
                         let dist_sq = normal.length_squared();
-                        let collision_dist = rad + point_rad;
-                        // TODO netclass clearance
+                        let collision_dist = rad + point_rad + max_clearance;
                         if dist_sq != 0.0 && dist_sq < collision_dist * collision_dist {
-                            self.curves[curve_index][edge_index].mark = true;
+                            //self.curves[curve_index][edge_index].mark = true;
 
                             // update points
                             let dist = dist_sq.sqrt();
@@ -803,17 +1010,29 @@ impl Data {
                                 / dist)
                                 .clamp_length_max(self.min_rad);
 
-                            let weight = if self.points[*j].neighbors < 2 {
-                                1.0
-                            } else {
-                                self.points[j.as_usize()].pos -= delta_pos * rad / collision_dist;
-                                point_rad / collision_dist
-                            };
+                            let other_mass = self.points[*j].get_mass(&self.points, &self.vias);
+                            let total_mass = mass + other_mass;
+                            let mut weight = other_mass / total_mass;
+                            if weight.is_nan() {
+                                weight = 1.0;
+                            }
+
+                            Self::displace(
+                                j.as_usize(),
+                                -delta_pos * (1.0 - weight),
+                                &mut self.points,
+                                &mut self.vias,
+                                &mut self.polygons,
+                                &mut self.footprints,
+                            );
+
                             let diff = delta_pos * weight;
-                            if self.points[i0].neighbors > 1 {
+                            if !self.points[i0].is_fixed() {
+                                offset0 += diff * (1.0 - t);
                                 p0 += diff * (1.0 - t);
                             }
-                            if self.points[i1].neighbors > 1 {
+                            if !self.points[i1].is_fixed() {
+                                offset1 += diff * t;
                                 p1 += diff * t;
                             }
                             aabb = AABB::edge(p0, p1, rad);
@@ -836,12 +1055,167 @@ impl Data {
                 }
             }
         }
-        self.points[i0].pos = p0;
-        self.points[i1].pos = p1;
+        Self::displace(
+            i0,
+            offset0,
+            &mut self.points,
+            &mut self.vias,
+            &mut self.polygons,
+            &mut self.footprints,
+        );
+        Self::displace(
+            i1,
+            offset1,
+            &mut self.points,
+            &mut self.vias,
+            &mut self.polygons,
+            &mut self.footprints,
+        );
+    }
+
+    // handle collisions between via and points
+    //
+    // potential optimization: only check non-edge points, via to edge point collision is already
+    // handled in edge-to-point collisions. for best performance would require a non-edge point only
+    // tree, but i'm not sure if it's worth it as i don't expect a large number of these.
+    fn collide_via(&mut self, index: usize, sim_settings: &SimSettings) {
+        let mut stack = Vec::<Idx<Node<PointNodeData>>>::new();
+
+        let net = self.vias[index].net;
+        let clearance = self.net_clearance[net];
+        let mass = self.vias[index].get_mass(&self.points);
+        let mut pos_offset = Vec2::ZERO;
+
+        for x in 0..self.vias[index].attached_points.len() {
+            let i = self.vias[index].attached_points[x];
+            let point = &self.points[i];
+            if let PointType::Child { has_edge, .. } = point.point_type
+                && has_edge
+            {
+                continue;
+            }
+            let layer = point.layer;
+            let rad = point.rad;
+            let pos = point.pos + pos_offset;
+            let aabb = AABB::center_radius(point.pos, point.rad);
+
+            let tree = &self.trees[layer];
+            stack.clear();
+            stack.push(tree.root);
+            while let Some(node) = stack.pop() {
+                if !aabb.collide_aabb(&tree.nodes[node].data.aabb) {
+                    continue;
+                }
+                if tree.nodes[node].is_leaf {
+                    let offset = tree.nodes[node].items;
+                    let nitems = tree.nodes[node].nitems;
+                    for j in tree.leaf_items[offset..offset + nitems].iter() {
+                        // skip same point
+                        if j.as_usize() == i {
+                            continue;
+                        }
+                        // skip points attached to the same parent via
+                        if let PointType::Child { parent, .. } = self.points[*j].point_type
+                            && parent == ParentIndex::Via(index)
+                        {
+                            continue;
+                        }
+                        let other_net = self.points[*j].net;
+                        if net == other_net && !sim_settings.self_collision.get() {
+                            continue;
+                        }
+                        let other_pos = self.points[*j].pos;
+                        let other_rad = self.points[*j].rad;
+                        let other_clearance = self.net_clearance[other_net];
+                        let max_clearance = clearance.max(other_clearance);
+
+                        let delta = other_pos - pos;
+                        let dist_sq = delta.length_squared();
+                        let collision_dist = rad + other_rad + max_clearance;
+                        if dist_sq != 0.0 && dist_sq < collision_dist * collision_dist {
+                            // update points
+                            let dist = dist_sq.sqrt();
+                            let delta_pos = ((1.0 + sim_settings.collision_elasticity.get())
+                                * delta
+                                * (dist - collision_dist)
+                                / dist)
+                                .clamp_length_max(self.min_rad);
+
+                            let other_mass = self.points[*j].get_mass(&self.points, &self.vias);
+                            let total_mass = mass + other_mass;
+                            let mut weight = other_mass / total_mass;
+                            if weight.is_nan() {
+                                weight = 1.0;
+                            }
+
+                            Self::displace(
+                                j.as_usize(),
+                                -delta_pos * (1.0 - weight),
+                                &mut self.points,
+                                &mut self.vias,
+                                &mut self.polygons,
+                                &mut self.footprints,
+                            );
+
+                            let diff = delta_pos * weight;
+                            if !self.points[i].is_fixed() {
+                                pos_offset += diff;
+                            }
+                        }
+                    }
+                } else {
+                    for child in tree.nodes[node]
+                        .children
+                        .iter()
+                        .filter(|x| x.as_usize() != 0usize)
+                    {
+                        stack.push(*child);
+                    }
+                }
+            }
+        }
+        self.vias[index].pos += pos_offset;
+        self.vias[index].update_points(&mut self.points)
+    }
+
+    fn collide_polygon(&mut self, index: usize, sim_settings: &SimSettings) {
+        //
+    }
+
+    fn displace(
+        idx: usize,
+        offset: Vec2,
+        points: &mut [Point],
+        vias: &mut [Via],
+        polygons: &mut [Polygon],
+        footprints: &mut [Footprint],
+    ) {
+        if offset.length_squared() == 0.0 {
+            return;
+        }
+        match points[idx].point_type {
+            PointType::Free { .. } => {
+                points[idx].pos += offset;
+            }
+            PointType::Child { parent, .. } => {
+                match parent {
+                    ParentIndex::Via(i) => {
+                        vias[i].pos += offset;
+                        vias[i].update_points(points);
+                    }
+                    ParentIndex::Polygon(i) => {
+                        //
+                    }
+                    ParentIndex::Footprint(i) => {
+                        //
+                    }
+                }
+            }
+        }
     }
 }
 
-fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
+fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
     let mut data = Data::new(true);
     let mut running = true;
     let mut paused = false;
@@ -859,7 +1233,8 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
                     running = false;
                 }
                 Command::Import => {
-                    data.import().expect("Could not import PCB from KiCad");
+                    data.import(&sim_settings)
+                        .expect("Could not import PCB from KiCad");
                     data.send(&tx);
                 }
                 Command::Pause => {
@@ -873,97 +1248,137 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Snapshot>) {
                 }
                 Command::Reset => {
                     data = Data::new(true);
-                    data.import().expect("Could not import PCB from KiCad");
+                    data.import(&sim_settings)
+                        .expect("Could not import PCB from KiCad");
                     data.send(&tx);
                 }
             }
         }
+
         if !paused {
             data.iterations += 1;
             // TODO parallelize
             if data.iterations.is_multiple_of(8) {
-                data.resample(&mut points_buf, &mut edges_buf);
+                data.resample(&mut points_buf, &mut edges_buf, &sim_settings);
                 data.sort_points();
                 data.rebuild_trees();
                 data.rebuild_net_trees();
-                data.points_to_back();
+                data.store_prev();
             }
 
             // apply forces
-            let k = 2.0;
-            let mut forces = vec![Vec2::ZERO; data.points.len()];
-            forces
-                .par_chunks_mut(PARALLEL_CHUNK_SIZE)
-                .enumerate()
-                .for_each(|(chunk_idx, chunk)| {
-                    chunk.iter_mut().enumerate().for_each(|(i, f)| {
-                        *f = data.compute_force(
-                            //&mut force_stack,
-                            PARALLEL_CHUNK_SIZE * chunk_idx + i,
-                            sim_settings.repulsion_degree,
-                            sim_settings.self_repulsion,
-                        ) * k
-                            * sim_settings.noodliness;
+            let k = 1.0;
+            let mut point_forces = vec![Vec2::ZERO; data.points.len()];
+            let mut via_forces = vec![Vec2::ZERO; data.vias.len()];
+            if sim_settings.noodliness.get() != 0.0 {
+                point_forces
+                    .par_chunks_mut(PARALLEL_CHUNK_SIZE)
+                    .enumerate()
+                    .for_each(|(chunk_idx, chunk)| {
+                        chunk.iter_mut().enumerate().for_each(|(i, f)| {
+                            *f = data.compute_force(
+                                //&mut force_stack,
+                                PARALLEL_CHUNK_SIZE * chunk_idx + i,
+                                sim_settings.repulsion_degree.get(),
+                                sim_settings.self_repulsion.get(),
+                            ) * k
+                                * sim_settings.noodliness.get();
+                        });
                     });
-                });
+            }
 
             for edge in data.curves.iter().flatten() {
                 edge.apply_tension(
                     &data.points,
-                    &mut forces,
-                    k * (1.0 - sim_settings.noodliness),
+                    &mut point_forces,
+                    k * (1.0 - sim_settings.noodliness.get()),
                 );
             }
 
             // integrate
-            if sim_settings.limit_step {
-                data.points
-                    .iter_mut()
-                    .enumerate()
-                    .for_each(|(i, pt)| pt.step_force_clamped(forces[i], delta, data.min_rad));
+            if sim_settings.limit_step.get() {
+                for (i, force) in point_forces.iter().enumerate() {
+                    data.points[i].step_force_clamped(
+                        *force,
+                        delta,
+                        0.5 * data.min_rad,
+                        &mut via_forces,
+                    )
+                }
+                for (i, via_force) in via_forces.iter().enumerate() {
+                    data.vias[i].step_force_clamped(
+                        *via_force,
+                        delta,
+                        0.5 * data.min_rad,
+                        &mut data.points,
+                    )
+                }
             } else {
                 data.points
                     .iter_mut()
                     .enumerate()
-                    .for_each(|(i, pt)| pt.step_force(forces[i], delta));
+                    .for_each(|(i, pt)| pt.step_force(point_forces[i], delta));
             }
 
             data.rebuild_trees();
             data.rebuild_net_trees();
 
             // collide
-            for _ in 0..sim_settings.collision_iterations {
+            //points_buf.resize(data.points.len(), Point::new())
+            for _ in 0..sim_settings.collision_iterations.get() {
                 for i in 0..data.curves.len() {
                     for j in 0..data.curves[i].len() {
                         data.collide_edge(
+                            //&mut data.points,
                             i,
                             j,
-                            sim_settings.collision_elasticity,
-                            sim_settings.self_collision,
+                            sim_settings.collision_elasticity.get(),
+                            sim_settings.self_collision.get(),
                         );
                     }
+                }
+                for i in 0..data.vias.len() {
+                    data.collide_via(i, &sim_settings);
                 }
             }
 
             // calculate velocity
-            for i in 0..data.points.len() {
-                data.points[i].update_velocity(delta);
-                data.points[i].v = data.points[i].v.clamp_length_max(data.min_rad / delta);
-                data.points[i].v *= 0.99;
+            for point in data.points.iter_mut() {
+                point.update_velocity(delta, 0.99)
+            }
+            for via in data.vias.iter_mut() {
+                via.update_velocity(delta, 0.99);
             }
 
             #[cfg(debug_assertions)]
-            for point in data.points.iter() {
-                assert!(
-                    (point.pos - point.pos_prev).length() <= 10.0 * data.min_rad,
-                    "large position difference: {} -> {}",
-                    point.pos_prev,
-                    point.pos
-                );
+            {
+                for point in data.points.iter() {
+                    match point.point_type {
+                        PointType::Free { pos_prev, .. } => {
+                            assert!(
+                                (point.pos - pos_prev).length() <= 10.0 * data.min_rad,
+                                "large position difference: {} -> {}",
+                                pos_prev,
+                                point.pos
+                            );
+                        }
+                        PointType::Child { .. } => {
+                            //
+                        }
+                    }
+                }
+                for via in data.vias.iter() {
+                    assert!(
+                        (via.pos - via.pos_prev).length() <= 10.0 * data.min_rad,
+                        "large via movement: {} -> {}",
+                        via.pos_prev,
+                        via.pos,
+                    )
+                }
             }
 
             // copy current position to back
-            data.points_to_back();
+            data.store_prev();
         } else {
             thread::sleep(std::time::Duration::from_millis(16));
         }

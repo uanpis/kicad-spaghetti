@@ -1,8 +1,11 @@
 use crate::app::AppState;
+use crate::draw::{Draw2D, ScreenInfo};
+use crate::utils::*;
 use egui::{CollapsingHeader, Context, widgets::DragValue};
-use egui_wgpu::wgpu::{CommandEncoder, Device, Queue, StoreOp, TextureFormat, TextureView};
+use egui_wgpu::wgpu::{CommandEncoder, Device, Queue, StoreOp, TextureView};
 use egui_wgpu::{Renderer, ScreenDescriptor, wgpu};
 use egui_winit::State;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use strum::IntoEnumIterator;
 use winit::event::WindowEvent;
@@ -22,11 +25,7 @@ impl EguiRenderer {
         self.state.egui_ctx()
     }
 
-    pub fn new(
-        device: &Device,
-        output_color_format: TextureFormat,
-        window: &Window,
-    ) -> EguiRenderer {
+    pub fn new(state: &mut AppState, window: &Window) -> EguiRenderer {
         let egui_context = Context::default();
 
         let egui_state = egui_winit::State::new(
@@ -37,11 +36,14 @@ impl EguiRenderer {
             None,
             Some(2 * 1024), // default dimension is 2048
         );
-        let egui_renderer = Renderer::new(
-            device,
-            output_color_format,
+        let mut egui_renderer = Renderer::new(
+            &state.device,
+            state.surface_config.format,
             egui_wgpu::RendererOptions::default(),
         );
+        egui_renderer
+            .callback_resources
+            .insert(state.draw2d.clone());
 
         EguiRenderer {
             state: egui_state,
@@ -123,53 +125,221 @@ impl EguiRenderer {
     pub fn build_ui(&mut self, state: &mut AppState) {
         #[allow(deprecated)]
         egui::CentralPanel::no_frame().show(self.context(), |ui| {
-            top_panel(ui, state);
-            left_panel(ui, state);
+            bottom_panel(ui, state);
+            right_panel(ui, state);
+            central_panel(ui, state);
         });
     }
 }
 
-fn top_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    egui::Panel::top(egui::Id::new("top_panel"))
-        .resizable(false)
-        .show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut state.leftpanel, "⬅");
-                if ui.button("↺").on_hover_text("Reset [R]").clicked() {
-                    state.sim.reset();
-                }
+struct Draw2DCallback {
+    screen_size: [u32; 2],
+}
+
+impl egui_wgpu::CallbackTrait for Draw2DCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        // set drawing surface size
+        let draw2d_arc = callback_resources.get::<Arc<Mutex<Draw2D>>>().unwrap();
+        let draw2d = draw2d_arc.lock().unwrap();
+        let size = self.screen_size;
+
+        draw2d.update_screen_info(
+            queue,
+            ScreenInfo {
+                size,
+                aspect_ratio: size[0] as f32 / size[1] as f32,
+                _pad: 0,
+            },
+        );
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let draw2d_arc = callback_resources.get::<Arc<Mutex<Draw2D>>>().unwrap();
+        let draw2d = draw2d_arc.lock().unwrap();
+        draw2d.render(render_pass);
+    }
+}
+
+// TODO clean up this
+use egui::{Color32, Event, Frame, Pos2, Rect, emath::RectTransform};
+
+fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        let available = ui.available_size();
+        let corner = ui.next_widget_position();
+
+        let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
+        let relative_pointer_gesture = ui.input(|i| {
+            i.events
+                .iter()
+                .any(|event| matches!(event, Event::MouseWheel { .. } | Event::Zoom { .. }))
+        });
+        let rect_proportions = response.rect.square_proportions();
+        let to_screen = RectTransform::from_to(
+            Rect::from_min_size(Pos2::ZERO - rect_proportions, 2. * rect_proportions),
+            response.rect,
+        );
+
+        if ui.input(|i| i.multi_touch().is_some()) || relative_pointer_gesture {
+            ui.input(|input| {
+                let interact_pos = to_screen.inverse().scale()
+                    * (input
+                        .pointer
+                        .interact_pos()
+                        .map(|x| x.to_vec2())
+                        .unwrap_or(0.5 * response.rect.size())
+                        - 0.5 * response.rect.size());
+
+                let pan_offset = to_screen.inverse().scale() * input.translation_delta()
+                    + interact_pos * (1.0 - input.zoom_delta());
+
+                state.zoom *= input.zoom_delta();
+                state.pan += glam::Vec2::new(pan_offset.x, pan_offset.y) / state.zoom;
+            });
+        }
+
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            Draw2DCallback {
+                screen_size: [available.x as u32, available.y as u32],
+            },
+        ));
+
+        let rect = egui::Rect::from_min_size(corner, egui::vec2(available.x, 20.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::RIGHT), |ui| {
                 if ui
-                    .button(if state.paused { "⏵" } else { "⏸" })
-                    .on_hover_text(if state.paused {
-                        "Run [Space]"
-                    } else {
-                        "Pause [Space]"
-                    })
+                    .add(
+                        Button::new(if state.rightpanel { "▶" } else { "◀" })
+                            .fill(ui.stack().bg_color()),
+                    )
                     .clicked()
                 {
-                    if state.paused {
-                        state.sim.resume();
-                    } else {
-                        state.sim.pause();
-                    }
-                    state.paused = !state.paused;
+                    state.rightpanel = !state.rightpanel;
                 }
             });
         });
+    });
 }
 
-fn left_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    egui::Panel::left(egui::Id::new("left_panel"))
+use egui::{Align, Button, Layout, RichText};
+
+fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    let button_size = egui::vec2(30.0, 30.0);
+    let text_size = 15.0;
+    egui::Panel::bottom(egui::Id::new("bottom_panel"))
+        .frame(egui::Frame::central_panel(ui.style()).inner_margin(5.0))
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            let col_width = ui.available_width() / 2.0;
+            egui::Grid::new("bottom_panel_grid")
+                .num_columns(2)
+                .min_col_width(col_width)
+                .max_col_width(col_width)
+                .spacing([0.0, 0.0])
+                .show(ui, |ui| {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        if ui
+                            .add_sized(button_size, Button::new(RichText::new("↺").size(text_size)),)
+                            .on_hover_text("Reset [R]")
+                            .clicked()
+                        {
+                            state.sim.reset();
+                        }
+
+                        if ui
+                            .add_sized(
+                                button_size,
+                                Button::new(
+                                    RichText::new(if state.paused { "⏵" } else { "⏸" })
+                                        .size(text_size),
+                                ),
+                            )
+                            .on_hover_text(if state.paused {
+                                "Run [Space]"
+                            } else {
+                                "Pause [Space]"
+                            })
+                            .clicked()
+                        {
+                            if state.paused {
+                                state.sim.resume();
+                            } else {
+                                state.sim.pause();
+                            }
+                            state.paused = !state.paused;
+                        }
+                    });
+
+                    ui.with_layout(Layout::right_to_left(Align::RIGHT), |ui| {
+                        if ui
+                            .add_sized(
+                                button_size,
+                                Button::new(RichText::new("Cancel").size(text_size)),
+                            )
+                            .clicked()
+                        {
+                            //
+                        }
+                        if ui
+                            .add_sized(
+                                button_size,
+                                Button::new(RichText::new("Apply").size(text_size)),
+                            )
+                            .clicked()
+                        {
+                            //
+                        }
+                    })
+                });
+        });
+}
+
+use egui::ScrollArea;
+
+fn right_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    egui::Panel::right(egui::Id::new("right_panel"))
         .resizable(true)
         .default_size(250.0)
         .size_range(100.0..=500.0)
-        .show_animated_inside(ui, state.leftpanel, |ui| {
-            sim_settings(ui, state);
-            graphics_settings(ui, state);
-            stats(ui, state);
-            ui.add(egui::Separator::default().grow(8.0));
-            ui.vertical_centered(|ui| {
-                ui.label("Left Panel");
+        .show_animated_inside(ui, state.rightpanel, |ui| {
+            ScrollArea::vertical().show(ui, |ui| {
+                egui::ComboBox::from_id_salt("presets_combo")
+                    .width(ui.available_width())
+                    .selected_text("Preset...")
+                    .show_ui(ui, |ui| {
+                        /*
+                        for variant in E::iter() {
+                            ui.selectable_value(value.get_mut(), variant, variant.to_string());
+                        }
+                        */
+                    })
+                    .response
+                    .on_hover_text("");
+
+                ui.add(egui::Separator::default().grow(8.0));
+                sim_settings(ui, state);
+                ui.add(egui::Separator::default().grow(8.0));
+                graphics_settings(ui, state);
+                ui.add(egui::Separator::default().grow(8.0));
+                stats(ui, state);
+                ui.add(egui::Separator::default().grow(8.0));
+                ui.vertical_centered(|ui| {
+                    ui.label("Right Panel");
+                });
             });
         });
 }
@@ -192,6 +362,14 @@ fn sim_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         "This does nothing for now :)",
                         "",
                         0.0..=1.0,
+                    );
+                    changed |= float_row(
+                        ui,
+                        &mut state.sim.sim_settings.segment_size,
+                        "Segment Size",
+                        "",
+                        "",
+                        2.0..=8.0,
                     );
 
                     changed |= percentage_row(
@@ -339,42 +517,43 @@ fn debug_settings(ui: &mut egui::Ui, state: &mut AppState) {
     })
     .body(|ui| {
     */
+    let mut draw2d = state.draw2d.lock().unwrap();
     CollapsingHeader::new("Debug")
         .default_open(true)
         .show(ui, |ui| {
-            ui.add_enabled_ui(state.draw2d.render_settings.debug, |ui| {
+            ui.add_enabled_ui(draw2d.render_settings.debug.get(), |ui| {
                 egui::Grid::new("gui_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    combo_row::<crate::draw::ColorMode>(
+                    combo_row(
                         ui,
-                        &mut state.draw2d.render_settings.color_mode,
+                        &mut draw2d.render_settings.color_mode,
                         "Color Mode",
                         "Rule to use for coloring edges",
                     );
                     bool_row(
                         ui,
-                        &mut state.draw2d.render_settings.edge_mark,
+                        &mut draw2d.render_settings.edge_mark,
                         "Highlight Collisions",
                         "Color Colliding Edges in Red",
                     );
                     bool_row(
                         ui,
-                        &mut state.draw2d.render_settings.quadtree,
+                        &mut draw2d.render_settings.quadtree,
                         "Quadtree",
                         "Show Quadtree visualisation",
                     );
                     bool_row(
                         ui,
-                        &mut state.draw2d.render_settings.nodebounds,
+                        &mut draw2d.render_settings.nodebounds,
                         "Bounding Boxes",
                         "Show bounding boxes of Quadtree Nodes",
                     );
                     bool_row(
                         ui,
-                        &mut state.draw2d.render_settings.mass_circles,
+                        &mut draw2d.render_settings.mass_circles,
                         "Mass Circles",
                         "Show Circles with area corresponding to Quadtree Node accumulated mass",
                     );
@@ -406,15 +585,30 @@ fn stats(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn bool_row(ui: &mut egui::Ui, value: &mut bool, label: &str, tooltip: &str) -> bool {
+fn bool_row(ui: &mut egui::Ui, value: &mut BoolResettable, label: &str, tooltip: &str) -> bool {
     let mut changed = false;
     property_row(ui, ROW_SPLIT, "", |ui| {
-        changed = ui.checkbox(value, label).on_hover_text(tooltip).changed();
+        let response = ui.checkbox(value.get_mut(), label).on_hover_text(tooltip);
+        egui::Popup::context_menu(&response)
+            .id(ui.make_persistent_id(label))
+            .show(|ui| {
+                if ui.button("Reset to Default").clicked() {
+                    value.reset();
+                    changed = true;
+                    ui.close();
+                }
+            });
+        changed |= response.changed();
     });
     changed
 }
 
-fn combo_row<E>(ui: &mut egui::Ui, value: &mut E, label: &str, tooltip: &str) -> bool
+fn combo_row<R: Resettable<E>, E>(
+    ui: &mut egui::Ui,
+    value: &mut R,
+    label: &str,
+    tooltip: &str,
+) -> bool
 where
     E: IntoEnumIterator + std::fmt::Display + Copy + PartialEq,
 {
@@ -422,22 +616,31 @@ where
     property_row(ui, ROW_SPLIT, label, |ui| {
         let response = egui::ComboBox::from_id_salt(label)
             .width(ui.available_width())
-            .selected_text(value.to_string())
+            .selected_text(value.get().to_string())
             .show_ui(ui, |ui| {
                 for variant in E::iter() {
-                    ui.selectable_value(value, variant, variant.to_string());
+                    ui.selectable_value(value.get_mut(), variant, variant.to_string());
                 }
             })
             .response
             .on_hover_text(tooltip);
-        changed = response.changed();
+        egui::Popup::context_menu(&response)
+            .id(ui.make_persistent_id(label))
+            .show(|ui| {
+                if ui.button("Reset to Default").clicked() {
+                    value.reset();
+                    changed = true;
+                    ui.close();
+                }
+            });
+        changed |= response.changed();
     });
     changed
 }
 
 fn float_row(
     ui: &mut egui::Ui,
-    value: &mut f32,
+    value: &mut F32Resettable,
     label: &str,
     tooltip: &str,
     suffix: &str,
@@ -445,27 +648,37 @@ fn float_row(
 ) -> bool {
     let mut changed = false;
     property_row(ui, ROW_SPLIT, label, |ui| {
-        let before = *value;
+        let before = value.value;
         let response = ui
             .add_sized(
                 [ui.available_width(), ui.spacing().interact_size.y],
-                DragValue::new(value)
+                DragValue::new(&mut value.value)
                     .speed(0.005 * (*range.end() - *range.start()))
                     .fixed_decimals(2)
                     .custom_formatter(|x, _| format!("{:.3}{}", x, suffix)),
             )
             .on_hover_text(tooltip);
+        // right click menu
+        egui::Popup::context_menu(&response)
+            .id(ui.make_persistent_id(label))
+            .show(|ui| {
+                if ui.button("Reset to Default").clicked() {
+                    value.reset();
+                    changed = true;
+                    ui.close();
+                }
+            });
         if response.dragged() && range.contains(&before) {
-            *value = value.clamp(*range.start(), *range.end());
+            value.set(value.value.clamp(*range.start(), *range.end()));
         }
-        changed = response.changed();
+        changed |= response.changed();
     });
     changed
 }
 
-fn integer_row<T: num::Integer + num::NumCast + emath::Numeric>(
+fn integer_row<R: Resettable<T>, T: num::Integer + num::NumCast + egui::emath::Numeric>(
     ui: &mut egui::Ui,
-    value: &mut T,
+    value: &mut R,
     label: &str,
     tooltip: &str,
     suffix: &str,
@@ -473,49 +686,66 @@ fn integer_row<T: num::Integer + num::NumCast + emath::Numeric>(
 ) -> bool {
     let mut changed = false;
     property_row(ui, ROW_SPLIT, label, |ui| {
-        let before = *value;
-        let value_i64 = <i64 as num::NumCast>::from::<T>(*value).unwrap();
+        let before = value.get();
+        let value_i64 = <i64 as num::NumCast>::from::<T>(value.get()).unwrap();
         let response = ui
             .add_sized(
                 [ui.available_width(), ui.spacing().interact_size.y],
-                DragValue::new(value)
+                DragValue::new(value.get_mut())
                     .speed(0.05 * value_i64 as f32)
                     .fixed_decimals(2)
                     .custom_formatter(|x, _| format!("{}{}", x, suffix)),
             )
             .on_hover_text(tooltip);
         if response.dragged() && range.contains(&before) {
-            *value = if *value <= *range.start() {
+            value.set(if value.get() <= *range.start() {
                 *range.start()
-            } else if *value > *range.end() {
+            } else if value.get() > *range.end() {
                 *range.end()
             } else {
-                *value
-            };
+                value.get()
+            });
         }
-        changed = response.changed();
+        changed |= response.changed();
     });
     changed
 }
 
-fn percentage_row(ui: &mut egui::Ui, value: &mut f32, label: &str, tooltip: &str) -> bool {
+fn percentage_row(
+    ui: &mut egui::Ui,
+    value: &mut F32Resettable,
+    label: &str,
+    tooltip: &str,
+) -> bool {
     let mut changed = false;
     property_row(ui, ROW_SPLIT, label, |ui| {
-        let before = *value;
+        let before = value.value;
         let response = ui
             .add_sized(
                 [ui.available_width(), ui.spacing().interact_size.y],
-                DragValue::new(value)
+                DragValue::new(&mut value.value)
                     .speed(0.01)
                     .fixed_decimals(2)
                     .custom_formatter(|x, _| format!("{:>3.0}%", 100.0 * x))
                     .custom_parser(|s| s.parse::<f32>().map(|x| 0.01 * x as f64).ok()),
             )
             .on_hover_text(tooltip);
+        // right click menu
+        egui::Popup::context_menu(&response)
+            .id(ui.make_persistent_id(label))
+            .show(|ui| {
+                if ui.button("Reset to Default").clicked() {
+                    value.reset();
+                    changed = true;
+                    ui.close();
+                }
+            });
+
+        // soft clamp
         if response.dragged() && (0.0..=1.0).contains(&before) {
-            *value = value.clamp(0.0, 1.0);
+            value.set(value.value.clamp(0.0, 1.0));
         }
-        changed = response.changed();
+        changed |= response.changed();
     });
     changed
 }
