@@ -9,7 +9,8 @@ anyhow = "1.0.102"
 # kicad
 # kicad-ipc-rs = { version = "0.5", features = ["blocking"] }
 kicad-ipc-rs = {
-	path = "../kicad-ipc-rs",
+	git = "https://github.com/uanpis/kicad-ipc-rs.git", 
+	branch = "no-submodules",
 	features = ["blocking"],
 }
 
