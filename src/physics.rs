@@ -1,4 +1,4 @@
-use crate::sim::Data;
+use crate::sim::{Data, SimSettings};
 use crate::tree::{HasPos, Node, QTreeData};
 use crate::typed_idx::*;
 use crate::utils::*;
@@ -38,15 +38,7 @@ impl Point {
                 }
             }
             PointType::Child { parent, .. } => match parent {
-                ParentIndex::Via(i) => {
-                    let sum: f32 = vias[i]
-                        .attached_points
-                        .iter()
-                        .map(|j| PI * points[*j].rad * points[*j].rad)
-                        .sum();
-                    sum
-                    //f32::INFINITY
-                }
+                ParentIndex::Via(i) => vias[i].get_mass(points),
                 _ => f32::INFINITY,
             },
         }
@@ -139,6 +131,7 @@ pub struct Via {
     pub v: Vec2,
 
     pub net: usize,
+    pub fixed: bool,
 
     pub attached_points: Vec<usize>,
 }
@@ -561,7 +554,12 @@ fn import_padstack(
 }
 
 impl Via {
-    pub fn from_kicad(via: &PcbVia, data: &mut Data, index: usize) -> Self {
+    pub fn from_kicad(
+        via: &PcbVia,
+        data: &mut Data,
+        sim_settings: &SimSettings,
+        index: usize,
+    ) -> Self {
         let via_pos = via.position_nm.to_mm();
         let netname = &via.net.as_ref().unwrap().name;
         let net = match data.net_map.get(netname) {
@@ -591,6 +589,7 @@ impl Via {
 
             v: Vec2::ZERO,
             net,
+            fixed: sim_settings.fix_vias.get(),
 
             attached_points,
         };
@@ -611,8 +610,12 @@ impl Via {
     }
 
     pub fn get_mass(&self, points: &[Point]) -> f32 {
-        let sum: f32 = self.attached_points.iter().map(|j| points[*j].rad).sum();
-        sum
+        if !self.fixed {
+            let sum: f32 = self.attached_points.iter().map(|j| points[*j].rad).sum();
+            sum
+        } else {
+            f32::INFINITY
+        }
     }
 
     pub fn step_force_clamped(

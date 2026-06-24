@@ -33,6 +33,8 @@ const MIN_DIST: f32 = 0.05;
 
 #[derive(Clone)]
 pub struct SimSettings {
+    pub fix_vias: BoolResettable,
+
     pub damping: F32Resettable,
     pub noodliness: F32Resettable,
 
@@ -51,6 +53,8 @@ pub struct SimSettings {
 impl SimSettings {
     fn new() -> Self {
         Self {
+            fix_vias: false.into(),
+
             damping: 1.0.into(),
             noodliness: 0.5.into(),
 
@@ -551,7 +555,7 @@ impl Data {
                 }
             })
             .enumerate()
-            .map(|(i, x)| Via::from_kicad(x, self, i))
+            .map(|(i, x)| Via::from_kicad(x, self, sim_settings, i))
             .collect();
 
         for layer in 0..self.layer_map.len() {
@@ -1079,6 +1083,10 @@ impl Data {
     // handled in edge-to-point collisions. for best performance would require a non-edge point only
     // tree, but i'm not sure if it's worth it as i don't expect a large number of these.
     fn collide_via(&mut self, index: usize, sim_settings: &SimSettings) {
+        if self.vias[index].fixed {
+            return;
+        }
+
         let mut stack = Vec::<Idx<Node<PointNodeData>>>::new();
 
         let net = self.vias[index].net;
@@ -1254,6 +1262,13 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                     paused = false;
                 }
                 Command::UpdateSettings(settings) => {
+                    if sim_settings.fix_vias.get() != settings.fix_vias.get() {
+                        for via in data.vias.iter_mut() {
+                            via.v = Vec2::ZERO;
+                            via.pos_prev = via.pos;
+                            via.fixed = settings.fix_vias.get();
+                        }
+                    }
                     sim_settings = settings;
                 }
                 Command::Reset => {
@@ -1350,8 +1365,10 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                         );
                     }
                 }
-                for i in 0..data.vias.len() {
-                    data.collide_via(i, &sim_settings);
+                if !sim_settings.fix_vias.get() {
+                    for i in 0..data.vias.len() {
+                        data.collide_via(i, &sim_settings);
+                    }
                 }
             }
 

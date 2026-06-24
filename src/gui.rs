@@ -354,6 +354,12 @@ fn sim_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 .spacing([40.0, 4.0])
                 .striped(true)
                 .show(ui, |ui| {
+                    changed |= bool_row(
+                        ui,
+                        &mut state.sim.sim_settings.fix_vias,
+                        "Fix Vias",
+                        "Disable Free movement of vias",
+                    );
                     //TODO implement
                     changed |= float_row(
                         ui,
