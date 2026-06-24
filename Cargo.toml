@@ -35,9 +35,3 @@ strum_macros = "0.28.0"
 # threading
 rayon = "1.12.0"
 crossbeam-channel = "0.5.15"
-
-[features]
-mark = []
-
-[profile.release]
-debug = true  # Tracy needs symbols to show useful names
