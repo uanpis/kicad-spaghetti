@@ -292,7 +292,7 @@ fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
                             )
                             .clicked()
                         {
-                            //
+                            state.exit_requested = true;
                         }
                         if ui
                             .add_sized(
@@ -338,7 +338,7 @@ fn right_panel(ui: &mut egui::Ui, state: &mut AppState) {
                 stats(ui, state);
                 ui.add(egui::Separator::default().grow(8.0));
                 ui.vertical_centered(|ui| {
-                    ui.label("Right Panel");
+                    ui.hyperlink_to("source code", "https://github.com/uanpis/kicad-spaghetti");
                 });
             });
         });

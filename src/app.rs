@@ -21,6 +21,7 @@ pub struct AppState {
     pub draw2d: Arc<Mutex<Draw2D>>,
     pub rightpanel: bool,
 
+    pub exit_requested: bool,
     pub paused: bool,
     pub fps: f32,
     pub time: Instant,
@@ -103,6 +104,7 @@ impl AppState {
             draw2d,
 
             rightpanel: true,
+            exit_requested: false,
             paused: false,
             fps: 0.0,
             time,
@@ -295,6 +297,9 @@ impl ApplicationHandler for App {
                 }
             }
             _ => (),
+        }
+        if self.state.as_ref().unwrap().exit_requested {
+            event_loop.exit();
         }
     }
 }
