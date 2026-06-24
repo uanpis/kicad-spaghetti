@@ -6,6 +6,7 @@ use glam::{Mat2, Vec2};
 use kicad_ipc_rs::model::board::{
     PcbFootprintInstance, PcbGraphicShapeGeometry, PcbItem, PcbPadStack, PcbPadStackLayer, PcbVia,
 };
+use std::f32::consts::PI;
 use std::ops::Index;
 
 #[derive(Debug, Clone)]
@@ -33,12 +34,16 @@ impl Point {
                 if self.is_fixed() {
                     f32::INFINITY
                 } else {
-                    self.rad
+                    PI * self.rad * self.rad
                 }
             }
             PointType::Child { parent, .. } => match parent {
                 ParentIndex::Via(i) => {
-                    let sum: f32 = vias[i].attached_points.iter().map(|j| points[*j].rad).sum();
+                    let sum: f32 = vias[i]
+                        .attached_points
+                        .iter()
+                        .map(|j| PI * points[*j].rad * points[*j].rad)
+                        .sum();
                     sum
                     //f32::INFINITY
                 }
@@ -72,7 +77,7 @@ pub enum PointType {
 #[derive(Debug, Clone)]
 pub struct PointNodeData {
     pub pos: Vec2,
-    pub rad: f32,
+    pub mass: f32,
     pub aabb: AABB,
 }
 
@@ -90,6 +95,7 @@ pub struct Edge {
 pub struct Polygon {
     pub points: Vec<usize>,
     pub rad: f32,
+    pub mass: f32,
     pub net: usize,
     pub layer: usize,
     pub parent_index: ParentIndex,
@@ -269,7 +275,7 @@ impl PointNodeData {
     fn new() -> Self {
         Self {
             pos: Vec2::ZERO,
-            rad: 0.0,
+            mass: 0.0,
             aabb: AABB::ZERO,
         }
     }
@@ -327,10 +333,16 @@ impl Polygon {
             net,
             layer,
             rad,
+            mass: 0.0,
             parent_index,
             triangulation: Vec::new(),
         };
         polygon.triangulate(pts);
+        let area = polygon.get_area(pts);
+        if area < 0.0 {
+            polygon.points.reverse();
+        }
+        polygon.mass = area.abs();
         polygon
     }
 
@@ -357,6 +369,33 @@ impl Polygon {
             p2 += 1;
         }
     }
+
+    pub fn get_area(&self, points: &[Point]) -> f32 {
+        let npoints = self.points.len();
+        let mut area: f32 = (0..npoints)
+            .map(|i| {
+                let p0 = points[self.points[i]].pos;
+                let p1 = points[self.points[(i + 1) % npoints]].pos;
+                p0.perp_dot(p1 - p0)
+            })
+            .sum();
+        let sign = area.signum();
+
+        if self.rad != 0.0 {
+            // approximate area of border, doesn't take into account overlapping borders in
+            // concave corners
+            let perimeter: f32 = (0..npoints)
+                .map(|i| {
+                    (points[self.points[i]].pos - points[self.points[(i + 1) % npoints]].pos)
+                        .length()
+                })
+                .sum();
+            area += perimeter * self.rad * sign;
+            // assume winding number of 1
+            area += PI * self.rad * self.rad * sign;
+        }
+        area
+    }
 }
 
 fn import_padstack(
@@ -370,7 +409,7 @@ fn import_padstack(
     let mut points = Vec::<usize>::new();
     let mut polygons = Vec::<usize>::new();
 
-    let angle = -padstack.angle.unwrap() as f32 * std::f32::consts::PI / 180.0;
+    let angle = -padstack.angle.unwrap() as f32 * PI / 180.0;
     let mut add_padstack_layer = |padstack_layer: &PcbPadStackLayer,
                                   layer_override: Option<usize>| {
         let layer = match layer_override {
@@ -429,7 +468,8 @@ fn import_padstack(
                         $rad,
                         net,
                         layer,
-                        ParentIndex::Polygon(i),
+                        //ParentIndex::Polygon(i),
+                        parent,
                     ));
                     poly_points.push(j);
                 }
@@ -565,6 +605,7 @@ impl Via {
             } else {
                 Vec2::ZERO
             };
+            // TODO remove offset
             points[*i].pos = self.pos + offset;
         });
     }
@@ -599,7 +640,7 @@ impl Via {
 impl Footprint {
     pub fn from_kicad(fp: &PcbFootprintInstance, data: &mut Data, i: usize) -> Self {
         let pos = fp.position_nm.to_mm();
-        let rot = -fp.orientation_deg.unwrap() as f32 * std::f32::consts::PI / 180.0;
+        let rot = -fp.orientation_deg.unwrap() as f32 * PI / 180.0;
         let inverse = Mat2::from_angle(rot).inverse();
 
         let segments: Vec<_> = if let Some(fp_def) = fp.definition.as_ref() {
@@ -838,7 +879,7 @@ impl QTreeData<Point, PointNodeData> for PointNodeData {
         let nitems = nodes[self_idx].nitems;
 
         let mut aabb = AABB::center_radius(items[leaf_items[offset]].pos, 0.0);
-        let mut rad = 0.0;
+        let mut mass = 0.0;
         let mut pos = Vec2::ZERO;
         for item in leaf_items[offset..offset + nitems].iter() {
             let net = items[*item].net;
@@ -857,29 +898,30 @@ impl QTreeData<Point, PointNodeData> for PointNodeData {
             aabb.miny = aabb.miny.min(miny);
             aabb.maxy = aabb.maxy.max(maxy);
 
-            rad += item_radius;
-            pos += item_pos * item_radius;
+            let item_mass = PI * item_radius * item_radius;
+            mass += item_mass;
+            pos += item_pos * item_mass;
         }
-        pos /= rad;
-        nodes[self_idx].data.rad = rad;
+        pos /= mass;
+        nodes[self_idx].data.mass = mass;
         nodes[self_idx].data.pos = pos;
         nodes[self_idx].data.aabb = aabb;
     }
 
     fn update_internal(self_idx: Idx<Node<PointNodeData>>, nodes: &mut [Node<PointNodeData>]) {
-        nodes[self_idx].data.rad = nodes[self_idx]
+        nodes[self_idx].data.mass = nodes[self_idx]
             .children
             .iter()
             .filter(|x| x.as_usize() != 0usize)
-            .map(|x| nodes[*x].data.rad)
+            .map(|x| nodes[*x].data.mass)
             .sum::<f32>();
         nodes[self_idx].data.pos = nodes[self_idx]
             .children
             .iter()
             .filter(|x| x.as_usize() != 0usize)
-            .map(|x| nodes[*x].data.pos * nodes[*x].data.rad)
+            .map(|x| nodes[*x].data.pos * nodes[*x].data.mass)
             .sum::<Vec2>()
-            / nodes[self_idx].data.rad;
+            / nodes[self_idx].data.mass;
 
         let mut bounds: Option<AABB> = None;
         nodes[self_idx]

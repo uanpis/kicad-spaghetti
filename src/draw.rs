@@ -708,7 +708,7 @@ fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
         .flat_map(|tree| &tree.nodes)
         .map(|node| CircleInstance {
             center: [node.data.pos.x, node.data.pos.y],
-            radius: node.data.rad.sqrt(),
+            radius: node.data.mass.sqrt(),
             color: [0.8, 0.2, 0.1, 0.4],
         })
         .collect()

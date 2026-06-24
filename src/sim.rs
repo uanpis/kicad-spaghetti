@@ -883,7 +883,7 @@ impl Data {
                 };
 
                 if rad * rad / distsq < METRIC * METRIC {
-                    force += f(delta, tree.nodes[node].data.rad, distsq);
+                    force += f(delta, tree.nodes[node].data.mass, distsq);
                 } else {
                     if tree.nodes[node].is_leaf {
                         let offset = tree.nodes[node].items;
@@ -1115,6 +1115,7 @@ impl Data {
                             continue;
                         }
                         // skip points attached to the same parent via
+                        //
                         if let PointType::Child { parent, .. } = self.points[*j].point_type
                             && parent == ParentIndex::Via(index)
                         {
@@ -1179,7 +1180,16 @@ impl Data {
     }
 
     fn collide_polygon(&mut self, index: usize, sim_settings: &SimSettings) {
-        //
+        let mut stack = Vec::<Idx<Node<PointNodeData>>>::new();
+
+        let net = self.vias[index].net;
+        let clearance = self.net_clearance[net];
+        let mass = self.polygons[index].mass;
+        let mut pos_offset = Vec2::ZERO;
+
+        for x in 0..self.polygons[index].points.len() {
+            //
+        }
     }
 
     fn displace(
@@ -1267,7 +1277,8 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
             }
 
             // apply forces
-            let k = 1.0;
+            let k = 1.0; // global force multiplier
+            let r = 0.5; // repulsion force multiplier
             let mut point_forces = vec![Vec2::ZERO; data.points.len()];
             let mut via_forces = vec![Vec2::ZERO; data.vias.len()];
             if sim_settings.noodliness.get() != 0.0 {
@@ -1282,6 +1293,8 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                                 sim_settings.repulsion_degree.get(),
                                 sim_settings.self_repulsion.get(),
                             ) * k
+                                * r
+                                * sim_settings.segment_size.get()
                                 * sim_settings.noodliness.get();
                         });
                     });
