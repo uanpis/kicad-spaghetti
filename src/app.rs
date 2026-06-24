@@ -1,5 +1,5 @@
 use crate::draw::*;
-use crate::gui::EguiRenderer;
+use crate::gui::{ColorTheme, EguiRenderer};
 use crate::sim::Sim;
 use crate::utils::*;
 use egui_wgpu::{ScreenDescriptor, wgpu};
@@ -32,6 +32,7 @@ pub struct AppState {
     pub surface_config: wgpu::SurfaceConfiguration,
     pub surface: wgpu::Surface<'static>,
     pub scale_factor: F32Resettable,
+    pub color_theme: ColorThemeResettable,
 
     pub zoom: f32,
     pub pan: Vec2,
@@ -115,6 +116,7 @@ impl AppState {
             surface,
             surface_config,
             scale_factor: 1.0.into(),
+            color_theme: ColorTheme::System.into(),
 
             zoom: 1.0,
             pan: Vec2::ZERO,

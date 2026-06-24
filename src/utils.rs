@@ -1,3 +1,4 @@
+use crate::gui::ColorTheme;
 use glam::Vec2;
 
 pub const fn hex_color(hex: u32) -> [f32; 4] {
@@ -148,3 +149,4 @@ impl_resettable!(F32Resettable, f32);
 impl_resettable!(U32Resettable, u32);
 impl_resettable!(UsizeResettable, usize);
 impl_resettable!(BoolResettable, bool);
+impl_resettable!(ColorThemeResettable, ColorTheme);

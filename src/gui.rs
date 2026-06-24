@@ -20,6 +20,13 @@ pub struct EguiRenderer {
     frame_started: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display, strum_macros::EnumIter)]
+pub enum ColorTheme {
+    System,
+    Light,
+    Dark,
+}
+
 impl EguiRenderer {
     pub fn context(&self) -> &Context {
         self.state.egui_ctx()
@@ -290,6 +297,7 @@ fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
                                 button_size,
                                 Button::new(RichText::new("Cancel").size(text_size)),
                             )
+                            .on_hover_text("Close without applying changes [Esc]")
                             .clicked()
                         {
                             state.exit_requested = true;
@@ -299,6 +307,7 @@ fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
                                 button_size,
                                 Button::new(RichText::new("Apply").size(text_size)),
                             )
+                            .on_hover_text("Apply modifications and exit [Enter]")
                             .clicked()
                         {
                             //
@@ -498,7 +507,18 @@ fn gui_settings(ui: &mut egui::Ui, state: &mut AppState) {
                 .spacing([40.0, 4.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    //TODO implement
+                    if combo_row(
+                        ui,
+                        &mut state.color_theme,
+                        "Color Theme",
+                        "Select dark / light theme",
+                    ) {
+                        ui.ctx().set_theme(match state.color_theme.get() {
+                            ColorTheme::System => egui::ThemePreference::System,
+                            ColorTheme::Light => egui::ThemePreference::Light,
+                            ColorTheme::Dark => egui::ThemePreference::Dark,
+                        });
+                    }
                     float_row(
                         ui,
                         &mut state.scale_factor,
@@ -618,7 +638,8 @@ fn combo_row<R: Resettable<E>, E>(
 where
     E: IntoEnumIterator + std::fmt::Display + Copy + PartialEq,
 {
-    let mut changed = false;
+    let old_value = value.get();
+
     property_row(ui, ROW_SPLIT, label, |ui| {
         let response = egui::ComboBox::from_id_salt(label)
             .width(ui.available_width())
@@ -630,18 +651,17 @@ where
             })
             .response
             .on_hover_text(tooltip);
+
         egui::Popup::context_menu(&response)
             .id(ui.make_persistent_id(label))
             .show(|ui| {
                 if ui.button("Reset to Default").clicked() {
                     value.reset();
-                    changed = true;
                     ui.close();
                 }
             });
-        changed |= response.changed();
     });
-    changed
+    value.get() != old_value
 }
 
 fn float_row(
