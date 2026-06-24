@@ -649,6 +649,8 @@ impl Data {
                 &mut Vec::<Point>::new(),
                 &mut Vec::<Vec<Edge>>::new(),
                 sim_settings,
+                true,
+                true,
             );
         }
         self.sort_points();
@@ -692,8 +694,11 @@ impl Data {
         points_buf: &mut Vec<Point>,
         curves_buf: &mut Vec<Vec<Edge>>,
         sim_settings: &SimSettings,
+        aggressive: bool,
+        use_angle: bool,
     ) {
-        const UNSUB_MAX_ANGLE: f32 = 10.0;
+        const UNSUB_MAX_ANGLE: f32 = 20.0;
+        const UNSUB_MAX_ANGLE_AGGRESSIVE: f32 = 30.0;
 
         // move points and edges to back buffer, write resampled to front
         std::mem::swap(&mut self.points, points_buf);
@@ -749,29 +754,39 @@ impl Data {
                 };
 
                 // unsubdivide
-                if len < 0.33 * segment_size
+                if len < if aggressive { 0.75 } else { 0.33 } * segment_size
                     && !unsubdivide
                     && neighbors == 2
                     && edge.w == next_w
-                    && !matches!(first.point_type, PointType::Child { .. })
-                    && {
-                        let p0 = points_buf[edge.i0].pos;
-                        let p1 = points_buf[edge.i1].pos;
-                        let p2 = points_buf[curve_read[i + 1].i1].pos;
-                        // angle
-                        (p0 - p1).angle_to(p2 - p1) < UNSUB_MAX_ANGLE * 180.0 / PI
-                    }
+                    && !matches!(points_buf[edge.i1].point_type, PointType::Child { .. })
+                    && (len < 0.1 * segment_size // skip angle check for very short edges, to
+                                                 // avoid formation of black holes
+                        || if i + 1 < curve_read.len() {
+                            let p0 = points_buf[edge.i0].pos;
+                            let p1 = points_buf[edge.i1].pos;
+                            let p2 = points_buf[curve_read[i + 1].i1].pos;
+                            // angle
+                            (p1 - p0).angle_to(p2 - p1).abs()
+                                < if aggressive {
+                                    UNSUB_MAX_ANGLE_AGGRESSIVE
+                                } else {
+                                    UNSUB_MAX_ANGLE
+                                } * PI
+                                    / 180.0
+                        } else {
+                            false
+                        })
                 {
                     unsubdivide = true;
                     continue;
                 }
 
                 // subdivide
-                if len > 2.0 * segment_size && !unsubdivide {
+                if len > if aggressive { 1.5 } else { 2.0 } * segment_size && !unsubdivide {
                     let p0 = points_buf[edge.i0].pos;
                     let p1 = points_buf[edge.i1].pos;
                     let net = points_buf[edge.i0].net;
-                    l0 *= 0.5;
+                    l0 = (l0 * 0.5).max(segment_size * 0.5);
                     let mut point = Point::new_free(0.5 * (p1 + p0), 0.5 * w, net, layer);
                     point.set_neighbors(2);
                     i1 = self.points.len();
@@ -1269,6 +1284,21 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                             via.fixed = settings.fix_vias.get();
                         }
                     }
+                    if sim_settings.segment_size.get() != settings.segment_size.get() {
+                        for _ in 0..3 {
+                            data.resample(
+                                &mut Vec::<Point>::new(),
+                                &mut Vec::<Vec<Edge>>::new(),
+                                &settings,
+                                true,
+                                true,
+                            );
+                        }
+                        data.sort_points();
+                        data.rebuild_trees();
+                        data.rebuild_net_trees();
+                        data.store_prev();
+                    }
                     sim_settings = settings;
                 }
                 Command::Reset => {
@@ -1284,7 +1314,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
             data.iterations += 1;
             // TODO parallelize
             if data.iterations.is_multiple_of(8) {
-                data.resample(&mut points_buf, &mut edges_buf, &sim_settings);
+                data.resample(&mut points_buf, &mut edges_buf, &sim_settings, false, false);
                 data.sort_points();
                 data.rebuild_trees();
                 data.rebuild_net_trees();
@@ -1293,7 +1323,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
 
             // apply forces
             let k = 1.0; // global force multiplier
-            let r = 0.5; // repulsion force multiplier
+            let r = 0.5 * sim_settings.segment_size.get(); // repulsion force multiplier
             let mut point_forces = vec![Vec2::ZERO; data.points.len()];
             let mut via_forces = vec![Vec2::ZERO; data.vias.len()];
             if sim_settings.noodliness.get() != 0.0 {
@@ -1309,7 +1339,6 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                                 sim_settings.self_repulsion.get(),
                             ) * k
                                 * r
-                                * sim_settings.segment_size.get()
                                 * sim_settings.noodliness.get();
                         });
                     });
