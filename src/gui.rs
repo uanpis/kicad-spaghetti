@@ -358,7 +358,7 @@ fn sim_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         ui,
                         &mut state.sim.sim_settings.fix_vias,
                         "Fix Vias",
-                        "Disable Free movement of vias",
+                        "Lock free movement of vias",
                     );
                     //TODO implement
                     changed |= float_row(

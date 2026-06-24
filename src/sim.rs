@@ -53,7 +53,7 @@ pub struct SimSettings {
 impl SimSettings {
     fn new() -> Self {
         Self {
-            fix_vias: false.into(),
+            fix_vias: true.into(),
 
             damping: 1.0.into(),
             noodliness: 0.5.into(),
