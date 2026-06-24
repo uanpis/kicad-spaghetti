@@ -64,7 +64,7 @@ impl SimSettings {
             self_repulsion: false.into(),
 
             collision_elasticity: 0.5.into(),
-            collision_iterations: 1.into(),
+            collision_iterations: 2.into(),
             self_collision: false.into(),
 
             limit_step: true.into(),
@@ -1379,8 +1379,14 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
 
             // collide
             //points_buf.resize(data.points.len(), Point::new())
-            for _ in 0..sim_settings.collision_iterations.get() {
+            for iteration in 0..sim_settings.collision_iterations.get() {
                 for i in 0..data.curves.len() {
+                    // reverse walk order every other iteration
+                    let i = if iteration.is_multiple_of(2) {
+                        data.curves.len() - i - 1
+                    } else {
+                        i
+                    };
                     for j in 0..data.curves[i].len() {
                         data.collide_edge(
                             //&mut data.points,
@@ -1393,6 +1399,12 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                 }
                 if !sim_settings.fix_vias.get() {
                     for i in 0..data.vias.len() {
+                        // reverse walk order every other iteration
+                        let i = if iteration.is_multiple_of(2) {
+                            data.vias.len() - i - 1
+                        } else {
+                            i
+                        };
                         data.collide_via(i, &sim_settings);
                     }
                 }
