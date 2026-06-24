@@ -264,7 +264,7 @@ fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
                             .add_sized(
                                 button_size,
                                 Button::new(
-                                    RichText::new(if state.paused { "⏵" } else { "⏸" })
+                                    RichText::new(if state.paused { "▶" } else { "⏸" })
                                         .size(text_size),
                                 ),
                             )
