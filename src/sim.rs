@@ -650,7 +650,6 @@ impl Data {
                 &mut Vec::<Vec<Edge>>::new(),
                 sim_settings,
                 true,
-                true,
             );
         }
         self.sort_points();
@@ -695,7 +694,6 @@ impl Data {
         curves_buf: &mut Vec<Vec<Edge>>,
         sim_settings: &SimSettings,
         aggressive: bool,
-        use_angle: bool,
     ) {
         const UNSUB_MAX_ANGLE: f32 = 20.0;
         const UNSUB_MAX_ANGLE_AGGRESSIVE: f32 = 30.0;
@@ -1291,7 +1289,6 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                                 &mut Vec::<Vec<Edge>>::new(),
                                 &settings,
                                 true,
-                                true,
                             );
                         }
                         data.sort_points();
@@ -1314,7 +1311,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
             data.iterations += 1;
             // TODO parallelize
             if data.iterations.is_multiple_of(8) {
-                data.resample(&mut points_buf, &mut edges_buf, &sim_settings, false, false);
+                data.resample(&mut points_buf, &mut edges_buf, &sim_settings, false);
                 data.sort_points();
                 data.rebuild_trees();
                 data.rebuild_net_trees();
