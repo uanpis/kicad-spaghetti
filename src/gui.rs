@@ -455,7 +455,7 @@ fn collision_settings(ui: &mut egui::Ui, state: &mut AppState) -> bool {
                         "Iterations",
                         "Number of iterations done by the collision solver",
                         "",
-                        1usize..=10,
+                        1usize..=20,
                     );
                     changed |= bool_row(
                         ui,
