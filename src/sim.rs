@@ -952,7 +952,7 @@ impl Data {
         // find collision point candidates
 
         let mut output = Vec::new();
-        let mut max_error = 0.0;
+        let mut max_error: f32 = 0.0;
 
         let mut stack = Vec::<Idx<Node<PointNodeData>>>::new();
         let i0 = self.curves[curve_index][edge_index].i0;
@@ -974,11 +974,6 @@ impl Data {
         } else {
             ParentIndex::Footprint(usize::MAX)
         };
-
-        // skip edges with same parent
-        if parent0 == parent1 {
-            return (output, max_error);
-        }
 
         let net = self.points[self.curves[curve_index][edge_index].i0].net;
         let clearance = self.net_clearance[net];
@@ -1043,6 +1038,7 @@ impl Data {
         (output, max_error)
     }
 
+    // TODO change this to "lone" points instead of vias
     fn get_points_colliding_via(
         &self,
         index: usize,
@@ -1171,21 +1167,14 @@ impl Data {
                     / dist)
                     .clamp_length_max(self.min_rad);
 
-                let other_mass = point.get_mass(&self.points, &self.vias);
+                let other_mass = point.get_mass(self);
                 let total_mass = mass + other_mass;
                 let mut weight = other_mass / total_mass;
                 if weight.is_nan() {
                     weight = 1.0;
                 }
 
-                Self::displace(
-                    *i,
-                    -delta_pos * (1.0 - weight),
-                    &mut self.points,
-                    &mut self.vias,
-                    &mut self.polygons,
-                    &mut self.footprints,
-                );
+                self.displace(*i, -delta_pos * (1.0 - weight));
 
                 let diff = delta_pos * weight;
                 if !self.points[i0].is_fixed() {
@@ -1205,22 +1194,8 @@ impl Data {
                 }
             }
         }
-        Self::displace(
-            i0,
-            offset0,
-            &mut self.points,
-            &mut self.vias,
-            &mut self.polygons,
-            &mut self.footprints,
-        );
-        Self::displace(
-            i1,
-            offset1,
-            &mut self.points,
-            &mut self.vias,
-            &mut self.polygons,
-            &mut self.footprints,
-        );
+        self.displace(i0, offset0);
+        self.displace(i1, offset1);
     }
 
     fn solve_via_point_collisions(
@@ -1277,26 +1252,19 @@ impl Data {
                         / dist)
                         .clamp_length_max(self.min_rad);
 
-                    let other_mass = point.get_mass(&self.points, &self.vias);
+                    let other_mass = point.get_mass(self);
                     let total_mass = mass + other_mass;
                     let mut weight = other_mass / total_mass;
                     if weight.is_nan() {
                         weight = 1.0;
                     }
 
-                    Self::displace(
-                        *other_point_index,
-                        -delta_pos * (1.0 - weight),
-                        &mut self.points,
-                        &mut self.vias,
-                        &mut self.polygons,
-                        &mut self.footprints,
-                    );
+                    self.displace(*other_point_index, -delta_pos * (1.0 - weight));
 
                     let diff = delta_pos * weight;
-                    if !self.points[index].is_fixed() {
-                        pos_offset += diff;
-                    }
+                    //if !self.points[i].is_fixed() {
+                    pos_offset += diff;
+                    //}
                 }
             }
         }
@@ -1304,26 +1272,19 @@ impl Data {
         self.vias[index].update_points(&mut self.points)
     }
 
-    fn displace(
-        idx: usize,
-        offset: Vec2,
-        points: &mut [Point],
-        vias: &mut [Via],
-        polygons: &mut [Polygon],
-        footprints: &mut [Footprint],
-    ) {
+    fn displace(&mut self, idx: usize, offset: Vec2) {
         if offset.length_squared() == 0.0 {
             return;
         }
-        match points[idx].point_type {
+        match self.points[idx].point_type {
             PointType::Free { .. } => {
-                points[idx].pos += offset;
+                self.points[idx].pos += offset;
             }
             PointType::Child { parent, .. } => {
                 match parent {
                     ParentIndex::Via(i) => {
-                        vias[i].pos += offset;
-                        vias[i].update_points(points);
+                        self.vias[i].pos += offset;
+                        self.vias[i].update_points(&mut self.points);
                     }
                     ParentIndex::Polygon(i) => {
                         //
@@ -1489,7 +1450,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                                     .get_points_colliding_edge(
                                         i,
                                         j,
-                                        2.0 * data.min_rad,
+                                        3.0 * data.min_rad,
                                         &sim_settings,
                                     );
                                 *edge = colliding_points;
@@ -1500,16 +1461,17 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                         });
                 });
             // find via-point collision candidates
+            let via_chunk_size = PARALLEL_CHUNK_SIZE;
             let mut via_collisions = vec![(Vec::<usize>::new(), 0.0f32); data.vias.len()];
             via_collisions
-                .par_chunks_mut(PARALLEL_CHUNK_SIZE)
+                .par_chunks_mut(via_chunk_size)
                 .enumerate()
                 .for_each(|(chunk_idx, chunk)| {
                     chunk.iter_mut().enumerate().for_each(
                         |(inner_index, (colliding_points, err))| {
-                            let i = chunk_idx * chunk_size + inner_index;
+                            let i = chunk_idx * via_chunk_size + inner_index;
                             (*colliding_points, *err) =
-                                data.get_points_colliding_via(i, 2.0 * data.min_rad, &sim_settings);
+                                data.get_points_colliding_via(i, 3.0 * data.min_rad, &sim_settings);
                         },
                     );
                 });
@@ -1564,19 +1526,6 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                         data.solve_via_point_collisions(*i, &via_collisions[*i].0, &sim_settings);
                     }
                 });
-                /*
-                if !sim_settings.fix_vias.get() {
-                    for i in 0..data.vias.len() {
-                        // reverse walk order every other iteration
-                        let i = if iteration.is_multiple_of(2) {
-                            data.vias.len() - i - 1
-                        } else {
-                            i
-                        };
-                        data.collide_via(i, &sim_settings);
-                    }
-                }
-                */
             }
 
             // calculate velocity
