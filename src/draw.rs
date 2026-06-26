@@ -95,7 +95,6 @@ impl_resettable!(ColorModeResettable, ColorMode);
 
 #[derive(Debug)]
 pub struct RenderSettings {
-    pub debug: BoolResettable,
     pub quadtree: BoolResettable,
     pub nodebounds: BoolResettable,
     pub mass_circles: BoolResettable,
@@ -111,7 +110,6 @@ impl Draw2D {
         snapshot: &Snapshot,
     ) -> Self {
         let render_settings = RenderSettings {
-            debug: true.into(),
             quadtree: false.into(),
             nodebounds: false.into(),
             mass_circles: false.into(),
@@ -267,8 +265,7 @@ impl Draw2D {
             device.create_shader_module(include_wgsl!("../shaders/circle_shader.wgsl"));
         let triangle_shader =
             device.create_shader_module(include_wgsl!("../shaders/triangle_shader.wgsl"));
-        let debug_shader =
-            device.create_shader_module(include_wgsl!("../shaders/debug_shader.wgsl"));
+        let line_shader = device.create_shader_module(include_wgsl!("../shaders/line_shader.wgsl"));
 
         // pipelines
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -360,7 +357,7 @@ impl Draw2D {
             4 => Float32x4, // color
             5 => Float32,   // radius
         ];
-        let debug_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+        let line_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
         let edge_pipeline = create_pipeline(
             device,
@@ -432,11 +429,11 @@ impl Draw2D {
             device,
             "Line Pipeline",
             &pipeline_layout,
-            &debug_shader,
+            &line_shader,
             &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<GpuVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &debug_attrs,
+                attributes: &line_attrs,
             }],
             wgpu::PrimitiveTopology::LineList,
             surface_format,
@@ -505,7 +502,7 @@ impl Draw2D {
             render_pass.set_vertex_buffer(1, self.triangle_instance_buf.slice(..));
             render_pass.draw(0..3, 0..self.triangle_instance_count);
         }
-        if self.render_settings.debug.get() && self.line_count > 0 {
+        if self.line_count > 0 {
             render_pass.set_pipeline(&self.line_pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.line_buf.slice(..));
@@ -573,7 +570,7 @@ impl Draw2D {
             self.render_settings.color_mode.get(),
             &colors,
         ));
-        if self.render_settings.debug.get() && self.render_settings.mass_circles.get() {
+        if self.render_settings.mass_circles.get() {
             circle_instances.extend(build_mass_circles(snapshot));
         }
         //circle_instances.extend(build_point_circles(snapshot));
@@ -613,30 +610,27 @@ impl Draw2D {
                 });
         }
 
-        if self.render_settings.debug.get() {
-            let mut vertices = Vec::<GpuVertex>::new();
-            if self.render_settings.quadtree.get() {
-                vertices.extend(build_debug_tree(snapshot));
-            }
-
-            if self.render_settings.nodebounds.get() {
-                vertices.extend(build_node_bounds(snapshot, &colors));
-            }
-
-            self.line_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Debug VBO"),
-                contents: if vertices.is_empty() {
-                    bytemuck::bytes_of(&GpuVertex {
-                        position: [0.0, 0.0],
-                        color: [0.0; 4],
-                    })
-                } else {
-                    bytemuck::cast_slice(&vertices)
-                },
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            self.line_count = vertices.len() as u32;
+        let mut vertices = Vec::<GpuVertex>::new();
+        if self.render_settings.quadtree.get() {
+            vertices.extend(build_debug_tree(snapshot));
         }
+        if self.render_settings.nodebounds.get() {
+            vertices.extend(build_node_bounds(snapshot, &colors));
+        }
+
+        self.line_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Line VBO"),
+            contents: if vertices.is_empty() {
+                bytemuck::bytes_of(&GpuVertex {
+                    position: [0.0, 0.0],
+                    color: [0.0; 4],
+                })
+            } else {
+                bytemuck::cast_slice(&vertices)
+            },
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        self.line_count = vertices.len() as u32;
     }
 }
 
