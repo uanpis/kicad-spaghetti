@@ -593,8 +593,10 @@ fn stats(ui: &mut egui::Ui, state: &mut AppState) {
             let delta_t = state.time.elapsed().as_millis();
             if delta_t >= FPS_INTERVAL_MS {
                 let i = state.sim.snapshot.iterations;
-                let n = i - state.iterations;
-                state.fps = 1000.0 * n as f32 / delta_t as f32;
+                if i > state.iterations {
+                    let n = i - state.iterations;
+                    state.fps = 1000.0 * n as f32 / delta_t as f32;
+                }
                 state.iterations = i;
                 state.time = Instant::now();
             }
