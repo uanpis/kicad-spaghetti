@@ -547,8 +547,7 @@ fn debug_settings(ui: &mut egui::Ui, state: &mut AppState) {
     CollapsingHeader::new("Debug")
         .default_open(true)
         .show(ui, |ui| {
-            ui.add_enabled_ui(draw2d.render_settings.debug.get(), |ui| {
-                egui::Grid::new("gui_settings_grid")
+            egui::Grid::new("gui_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -584,7 +583,6 @@ fn debug_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         "Show Circles with area corresponding to Quadtree Node accumulated mass",
                     );
                 });
-            });
         });
 }
 
