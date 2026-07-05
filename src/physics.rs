@@ -28,7 +28,7 @@ impl Point {
         }
     }
 
-    pub fn get_mass(&self, points: &[Point], vias: &[Via]) -> f32 {
+    pub fn get_mass(&self, data: &Data) -> f32 {
         match self.point_type {
             PointType::Free { .. } => {
                 if self.is_fixed() {
@@ -38,7 +38,7 @@ impl Point {
                 }
             }
             PointType::Child { parent, .. } => match parent {
-                ParentIndex::Via(i) => vias[i].get_mass(points),
+                ParentIndex::Via(i) => data.vias[i].get_mass(&data.points),
                 _ => f32::INFINITY,
             },
         }
@@ -388,6 +388,101 @@ impl Polygon {
             area += PI * self.rad * self.rad * sign;
         }
         area
+    }
+
+    pub fn get_aabb(&self, points: &[Point], expansion: f32) -> AABB {
+        let mut minx = f32::INFINITY;
+        let mut maxx = -f32::INFINITY;
+        let mut miny = f32::INFINITY;
+        let mut maxy = -f32::INFINITY;
+        self.points.iter().for_each(|pt| {
+            minx = minx.min(points[*pt].pos.x);
+            maxx = maxx.max(points[*pt].pos.x);
+            miny = miny.min(points[*pt].pos.y);
+            maxy = maxy.max(points[*pt].pos.y);
+        });
+        minx -= self.rad + expansion;
+        maxx += self.rad + expansion;
+        miny -= self.rad + expansion;
+        maxy += self.rad + expansion;
+        AABB {
+            minx,
+            maxx,
+            miny,
+            maxy,
+        }
+    }
+
+    pub fn contains(&self, pos: Vec2, points: &[Point]) -> bool {
+        // horizontal rightwards raycast
+        let npoints = self.points.len();
+        let mut n = 0;
+        for i in 0..npoints {
+            let p0 = points[self.points[i]].pos;
+            let p1 = points[self.points[(i + 1) % npoints]].pos;
+            // skip horizontal edges
+            if p0.y == p1.y {
+                continue;
+            }
+            // skip edges entirely left of point
+            if p0.x < pos.x && p1.x < pos.x {
+                continue;
+            }
+            let t = (pos.y - p0.y) / (p1.y - p0.y);
+            if !(0.0..1.0).contains(&t) {
+                continue;
+            }
+            let intersect = p0 + (p1 - p0) * t;
+            if intersect.x < pos.x {
+                continue;
+            }
+            n += if p1.y < p0.y { -1 } else { 1 };
+        }
+        n != 0
+    }
+
+    pub fn project(&self, pos: Vec2, points: &[Point]) -> Vec2 {
+        let npoints = self.points.len();
+        let mut dsq = f32::INFINITY;
+        let mut closest = points[self.points[0]].pos;
+        for i in 0..npoints {
+            let p0 = points[self.points[i]].pos;
+            let p1 = points[self.points[(i + 1) % npoints]].pos;
+            let e = p1 - p0;
+            let t = ((pos - p0).dot(e) / e.length_squared()).clamp(0.0, 1.0);
+
+            let current_closest = p0 + (p1 - p0) * t;
+            let current_dsq = (current_closest - pos).length_squared();
+            if current_dsq < dsq {
+                closest = current_closest;
+                dsq = current_dsq;
+            }
+        }
+        closest
+    }
+
+    pub fn abs_distance(&self, pos: Vec2, points: &[Point]) -> f32 {
+        let npoints = self.points.len();
+        let mut dsq = f32::INFINITY;
+        for i in 0..npoints {
+            let p0 = points[self.points[i]].pos;
+            let p1 = points[self.points[(i + 1) % npoints]].pos;
+            let e = p1 - p0;
+            let t = ((pos - p0).dot(e) / e.length_squared()).clamp(0.0, 1.0);
+
+            let current_dsq = (p0 + (p1 - p0) * t - pos).length_squared();
+            dsq = dsq.min(current_dsq);
+        }
+        dsq.sqrt()
+    }
+
+    pub fn signed_distance(&self, pos: Vec2, points: &[Point]) -> f32 {
+        self.abs_distance(pos, points)
+            * if self.contains(pos, points) {
+                -1.0
+            } else {
+                1.0
+            }
     }
 }
 
