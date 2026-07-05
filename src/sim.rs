@@ -1528,12 +1528,16 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                 });
             }
 
+            let base = 100.0f32;
+            let x = sim_settings.damping.get();
+            let dampingvalue = 1.0 - (base.pow(x) - 1.0) / (base - 1.0);
+
             // calculate velocity
             for point in data.points.iter_mut() {
-                point.update_velocity(delta, 0.99)
+                point.update_velocity(delta, dampingvalue);
             }
             for via in data.vias.iter_mut() {
-                via.update_velocity(delta, 0.99);
+                via.update_velocity(delta, dampingvalue);
             }
 
             #[cfg(debug_assertions)]
