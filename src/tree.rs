@@ -1,7 +1,6 @@
 use crate::typed_idx::*;
 use glam::Vec2;
 const BUCKET_SIZE: usize = 32;
-#[cfg(debug_assertions)]
 const INSERT_LIMIT: usize = 100;
 
 const UP: Vec2 = Vec2::new(1.0, 0.0);
@@ -167,19 +166,15 @@ impl<T: HasPos, D: QTreeData<T, D> + Clone> QuadTree<T, D> {
         };
 
         let mut rad = self.rad;
-        #[cfg(debug_assertions)]
         let mut i = 0;
         loop {
-            #[cfg(debug_assertions)]
-            {
-                i += 1;
-                if i > INSERT_LIMIT {
-                    panic!(
-                        "Tree Insertion recursion limit of {} surpassed: item at {:?}",
-                        INSERT_LIMIT,
-                        items[index].get_pos()
-                    );
-                }
+            i += 1;
+            if i > INSERT_LIMIT {
+                panic!(
+                    "Tree Insertion recursion limit of {} surpassed: item at {:?}",
+                    INSERT_LIMIT,
+                    items[index].get_pos()
+                );
             }
 
             let is_leaf = self.nodes[node_index].is_leaf;
