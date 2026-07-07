@@ -1354,20 +1354,37 @@ impl Data {
         let net = self.polygons[index].net;
         let clearance = self.net_clearance[net];
 
+        let npoints = self.polygons[index].points.len();
+        let center = self.polygons[index]
+            .points
+            .iter()
+            .map(|p| self.points[*p].pos)
+            .sum::<Vec2>()
+            / npoints as f32;
+
         for i in points.iter() {
             let point = &self.points[*i];
             let point_net = point.net;
-            let point_pos = point.pos;
+            let mut point_pos = point.pos;
             let point_rad = point.rad;
             let point_clearance = self.net_clearance[point_net];
             let max_clearance = clearance.max(point_clearance);
 
-            let normal = point_pos - self.polygons[index].project(point_pos, &self.points);
-            let dist = if self.polygons[index].contains(point_pos, &self.points) {
-                -normal.length()
-            } else {
-                normal.length()
-            };
+            let mut normal;
+            let mut dist;
+            loop {
+                normal = point_pos - self.polygons[index].project(point_pos, &self.points);
+                dist = if self.polygons[index].contains(point_pos, &self.points) {
+                    -normal.length()
+                } else {
+                    normal.length()
+                };
+                if dist != 0.0 {
+                    break;
+                }
+                point_pos = center + 1.00001 * (point_pos - center);
+            }
+
             let collision_dist = rad + point_rad + max_clearance;
             if dist < collision_dist {
                 // update points
