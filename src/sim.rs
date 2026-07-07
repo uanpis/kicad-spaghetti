@@ -1571,6 +1571,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                             *err = curve_max_error;
                         });
                 });
+
             // find via-point collision candidates
             let via_chunk_size = PARALLEL_CHUNK_SIZE;
             let mut via_collisions = vec![(Vec::<usize>::new(), 0.0f32); data.vias.len()];
@@ -1586,6 +1587,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                         },
                     );
                 });
+
             // find polygon-point collision candidates
             let polygon_chunk_size = PARALLEL_CHUNK_SIZE;
             let mut polygon_collisions = vec![(Vec::<usize>::new(), 0.0f32); data.polygons.len()];
