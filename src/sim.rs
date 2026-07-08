@@ -1691,7 +1691,7 @@ fn sim_loop(rx: Receiver<Command>, tx: Sender<Response>) {
                 });
             }
 
-            let base = 100.0f32;
+            let base = 1000.0f32;
             let x = sim_settings.damping.get();
             let dampingvalue = 1.0 - (base.pow(x) - 1.0) / (base - 1.0);
 
