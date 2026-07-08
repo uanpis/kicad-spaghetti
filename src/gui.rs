@@ -190,9 +190,12 @@ fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::drag());
         let relative_pointer_gesture = ui.input(|i| {
-            i.events
-                .iter()
-                .any(|event| matches!(event, Event::MouseWheel { .. } | Event::Zoom { .. }))
+            i.events.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::MouseWheel { .. } | Event::Zoom { .. } | Event::PointerMoved(..)
+                )
+            })
         });
         let rect_proportions = response.rect.square_proportions();
         let to_screen = RectTransform::from_to(
@@ -210,7 +213,15 @@ fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
                         .unwrap_or(0.5 * response.rect.size())
                         - 0.5 * response.rect.size());
 
-                let pan_offset = to_screen.inverse().scale() * input.translation_delta()
+                let pan_offset = to_screen.inverse().scale()
+                    * (input.translation_delta()
+                        + if input.pointer.button_down(egui::PointerButton::Secondary)
+                            || input.pointer.button_down(egui::PointerButton::Middle)
+                        {
+                            input.pointer.delta()
+                        } else {
+                            egui::Vec2::ZERO
+                        })
                     + interact_pos * (1.0 - input.zoom_delta());
 
                 state.zoom *= input.zoom_delta();
