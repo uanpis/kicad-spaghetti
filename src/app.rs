@@ -91,12 +91,7 @@ impl AppState {
         surface.configure(&device, &surface_config);
 
         let sim = Sim::new();
-        let draw2d = Arc::new(Mutex::new(Draw2D::new(
-            &device,
-            &queue,
-            selected_format,
-            &sim.snapshot,
-        )));
+        let draw2d = Arc::new(Mutex::new(Draw2D::new(&device, &queue, selected_format)));
 
         let time = Instant::now();
 
@@ -133,19 +128,8 @@ impl AppState {
         let snapshot = self.sim.get_snapshot();
         if snapshot.new {
             snapshot.new = false;
-            let z: f32 = 2.0 / snapshot.radius;
-            let zoom = z * self.zoom;
-            let pan = self.pan / z - snapshot.center;
             let mut draw2d = self.draw2d.lock().unwrap();
             draw2d.rebuild(&self.device, &self.queue, snapshot);
-            draw2d.update_globals(
-                &self.queue,
-                GpuGlobals {
-                    zoom,
-                    pan: pan.into(),
-                    _pad: 0,
-                },
-            )
         }
     }
 

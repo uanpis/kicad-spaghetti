@@ -1,14 +1,10 @@
-struct Globals {
-    pan: vec2<f32>,
-    zoom: f32,
-}
-@group(0) @binding(0) var<uniform> globals: Globals;
-
 struct ScreenInfo {
     size: vec2<u32>,
+    pan: vec2<f32>,
+    zoom: f32,
     aspect_ratio: f32,
 }
-@group(0) @binding(1) var<uniform> screen_info: ScreenInfo;
+@group(0) @binding(0) var<uniform> screen_info: ScreenInfo;
 
 struct VertexIn {
     @location(0) position: vec2<f32>,
@@ -21,7 +17,7 @@ struct VertexOut {
 }
 
 fn to_screen_space(world: vec2<f32>) -> vec4<f32> {
-    let v = (world + globals.pan) * globals.zoom;
+    let v = (world + screen_info.pan) * screen_info.zoom;
     return vec4(v.x / screen_info.aspect_ratio, -v.y, 0.0, 1.0);
 }
 

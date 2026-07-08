@@ -1,10 +1,15 @@
 use crate::app::AppState;
 use crate::draw::{Draw2D, ScreenInfo};
 use crate::utils::*;
-use egui::{CollapsingHeader, Context, widgets::DragValue};
-use egui_wgpu::wgpu::{CommandEncoder, Device, Queue, StoreOp, TextureView};
-use egui_wgpu::{Renderer, ScreenDescriptor, wgpu};
-use egui_winit::State;
+use egui::{
+    Align, Button, CentralPanel, CollapsingHeader, ComboBox, Context, Event, Frame, Grid, Layout,
+    Panel, PointerButton, Popup, Pos2, Rect, RichText, ScrollArea, Separator, ThemePreference, Ui,
+    UiBuilder, emath, emath::RectTransform, viewport::ViewportId, widgets::DragValue,
+};
+use egui_wgpu::{
+    CallbackTrait, Renderer, RendererOptions, ScreenDescriptor, wgpu,
+    wgpu::{CommandEncoder, Device, Queue, StoreOp, TextureView},
+};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use strum::IntoEnumIterator;
@@ -15,7 +20,7 @@ const FPS_INTERVAL_MS: u128 = 500;
 const ROW_SPLIT: f32 = 0.3;
 
 pub struct EguiRenderer {
-    state: State,
+    state: egui_winit::State,
     renderer: Renderer,
     frame_started: bool,
 }
@@ -37,7 +42,7 @@ impl EguiRenderer {
 
         let egui_state = egui_winit::State::new(
             egui_context,
-            egui::viewport::ViewportId::ROOT,
+            ViewportId::ROOT,
             &window,
             Some(window.scale_factor() as f32),
             None,
@@ -46,7 +51,7 @@ impl EguiRenderer {
         let mut egui_renderer = Renderer::new(
             &state.device,
             state.surface_config.format,
-            egui_wgpu::RendererOptions::default(),
+            RendererOptions::default(),
         );
         egui_renderer
             .callback_resources
@@ -108,8 +113,8 @@ impl EguiRenderer {
                 view: window_surface_view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: egui_wgpu::wgpu::Operations {
-                    load: egui_wgpu::wgpu::LoadOp::Load,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
                     store: StoreOp::Store,
                 },
             })],
@@ -131,7 +136,7 @@ impl EguiRenderer {
 
     pub fn build_ui(&mut self, state: &mut AppState) {
         #[allow(deprecated)]
-        egui::CentralPanel::no_frame().show(self.context(), |ui| {
+        CentralPanel::no_frame().show(self.context(), |ui| {
             bottom_panel(ui, state);
             right_panel(ui, state);
             central_panel(ui, state);
@@ -141,9 +146,11 @@ impl EguiRenderer {
 
 struct Draw2DCallback {
     screen_size: [u32; 2],
+    pan: glam::Vec2,
+    zoom: f32,
 }
 
-impl egui_wgpu::CallbackTrait for Draw2DCallback {
+impl CallbackTrait for Draw2DCallback {
     fn prepare(
         &self,
         _device: &wgpu::Device,
@@ -161,8 +168,9 @@ impl egui_wgpu::CallbackTrait for Draw2DCallback {
             queue,
             ScreenInfo {
                 size,
+                zoom: self.zoom,
+                pan: self.pan.into(),
                 aspect_ratio: size[0] as f32 / size[1] as f32,
-                _pad: 0,
             },
         );
         Vec::new()
@@ -180,11 +188,8 @@ impl egui_wgpu::CallbackTrait for Draw2DCallback {
     }
 }
 
-// TODO clean up this
-use egui::{Color32, Event, Frame, Pos2, Rect, emath::RectTransform};
-
-fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+fn central_panel(ui: &mut Ui, state: &mut AppState) {
+    CentralPanel::default().show_inside(ui, |ui| {
         let available = ui.available_size();
         let corner = ui.next_widget_position();
 
@@ -215,8 +220,8 @@ fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
 
                 let pan_offset = to_screen.inverse().scale()
                     * (input.translation_delta()
-                        + if input.pointer.button_down(egui::PointerButton::Secondary)
-                            || input.pointer.button_down(egui::PointerButton::Middle)
+                        + if input.pointer.button_down(PointerButton::Secondary)
+                            || input.pointer.button_down(PointerButton::Middle)
                         {
                             input.pointer.delta()
                         } else {
@@ -229,15 +234,22 @@ fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
             });
         }
 
+        let snapshot = state.sim.get_snapshot();
+        let z: f32 = 2.0 / snapshot.radius;
+        let zoom = z * state.zoom;
+        let pan = state.pan / z - snapshot.center;
+
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
             rect,
             Draw2DCallback {
                 screen_size: [available.x as u32, available.y as u32],
+                zoom,
+                pan,
             },
         ));
 
-        let rect = egui::Rect::from_min_size(corner, egui::vec2(available.x, 20.0));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        let rect = Rect::from_min_size(corner, egui::vec2(available.x, 20.0));
+        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ui.with_layout(Layout::right_to_left(Align::RIGHT), |ui| {
                 if ui
                     .add(
@@ -253,17 +265,15 @@ fn central_panel(ui: &mut egui::Ui, state: &mut AppState) {
     });
 }
 
-use egui::{Align, Button, Layout, RichText};
-
-fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
+fn bottom_panel(ui: &mut Ui, state: &mut AppState) {
     let button_size = egui::vec2(30.0, 30.0);
     let text_size = 15.0;
-    egui::Panel::bottom(egui::Id::new("bottom_panel"))
-        .frame(egui::Frame::central_panel(ui.style()).inner_margin(5.0))
+    Panel::bottom(egui::Id::new("bottom_panel"))
+        .frame(Frame::central_panel(ui.style()).inner_margin(5.0))
         .resizable(false)
         .show_inside(ui, |ui| {
             let col_width = ui.available_width() / 2.0;
-            egui::Grid::new("bottom_panel_grid")
+            Grid::new("bottom_panel_grid")
                 .num_columns(2)
                 .min_col_width(col_width)
                 .max_col_width(col_width)
@@ -328,19 +338,18 @@ fn bottom_panel(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-use egui::ScrollArea;
-
-fn right_panel(ui: &mut egui::Ui, state: &mut AppState) {
-    egui::Panel::right(egui::Id::new("right_panel"))
+fn right_panel(ui: &mut Ui, state: &mut AppState) {
+    Panel::right(egui::Id::new("right_panel"))
         .resizable(true)
         .default_size(250.0)
         .size_range(100.0..=500.0)
         .show_animated_inside(ui, state.rightpanel, |ui| {
             ScrollArea::vertical().show(ui, |ui| {
-                egui::ComboBox::from_id_salt("presets_combo")
+                ComboBox::from_id_salt("presets_combo")
                     .width(ui.available_width())
                     .selected_text("Preset...")
                     .show_ui(ui, |ui| {
+                        //TODO
                         /*
                         for variant in E::iter() {
                             ui.selectable_value(value.get_mut(), variant, variant.to_string());
@@ -350,13 +359,13 @@ fn right_panel(ui: &mut egui::Ui, state: &mut AppState) {
                     .response
                     .on_hover_text("");
 
-                ui.add(egui::Separator::default().grow(8.0));
+                ui.add(Separator::default().grow(8.0));
                 sim_settings(ui, state);
-                ui.add(egui::Separator::default().grow(8.0));
+                ui.add(Separator::default().grow(8.0));
                 graphics_settings(ui, state);
-                ui.add(egui::Separator::default().grow(8.0));
+                ui.add(Separator::default().grow(8.0));
                 stats(ui, state);
-                ui.add(egui::Separator::default().grow(8.0));
+                ui.add(Separator::default().grow(8.0));
                 ui.vertical_centered(|ui| {
                     ui.hyperlink_to("source code", "https://github.com/uanpis/kicad-spaghetti");
                 });
@@ -364,12 +373,12 @@ fn right_panel(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn sim_settings(ui: &mut egui::Ui, state: &mut AppState) {
+fn sim_settings(ui: &mut Ui, state: &mut AppState) {
     let mut changed = false;
     CollapsingHeader::new("Simulation")
         .default_open(true)
         .show(ui, |ui| {
-            egui::Grid::new("sim_settings_grid")
+            Grid::new("sim_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -415,12 +424,12 @@ fn sim_settings(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-fn repulsion_settings(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+fn repulsion_settings(ui: &mut Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     CollapsingHeader::new("Repulsion")
         .default_open(true)
         .show(ui, |ui| {
-            egui::Grid::new("repulsion_settings_grid")
+            Grid::new("repulsion_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -444,12 +453,12 @@ fn repulsion_settings(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     changed
 }
 
-fn collision_settings(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+fn collision_settings(ui: &mut Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     CollapsingHeader::new("Collision")
         .default_open(true)
         .show(ui, |ui| {
-            egui::Grid::new("collision_settings_grid")
+            Grid::new("collision_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -479,12 +488,12 @@ fn collision_settings(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     changed
 }
 
-fn sim_settings_extra(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+fn sim_settings_extra(ui: &mut Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     CollapsingHeader::new("Advanced")
         .default_open(false)
         .show(ui, |ui| {
-            egui::Grid::new("sim_settings_extra_grid")
+            Grid::new("sim_settings_extra_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -500,7 +509,7 @@ fn sim_settings_extra(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     changed
 }
 
-fn graphics_settings(ui: &mut egui::Ui, state: &mut AppState) {
+fn graphics_settings(ui: &mut Ui, state: &mut AppState) {
     CollapsingHeader::new("Graphics")
         .default_open(false)
         .show(ui, |ui| {
@@ -509,11 +518,11 @@ fn graphics_settings(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn gui_settings(ui: &mut egui::Ui, state: &mut AppState) {
+fn gui_settings(ui: &mut Ui, state: &mut AppState) {
     CollapsingHeader::new("Gui")
         .default_open(false)
         .show(ui, |ui| {
-            egui::Grid::new("gui_settings_grid")
+            Grid::new("gui_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -525,9 +534,9 @@ fn gui_settings(ui: &mut egui::Ui, state: &mut AppState) {
                         "Select dark / light theme",
                     ) {
                         ui.ctx().set_theme(match state.color_theme.get() {
-                            ColorTheme::System => egui::ThemePreference::System,
-                            ColorTheme::Light => egui::ThemePreference::Light,
-                            ColorTheme::Dark => egui::ThemePreference::Dark,
+                            ColorTheme::System => ThemePreference::System,
+                            ColorTheme::Light => ThemePreference::Light,
+                            ColorTheme::Dark => ThemePreference::Dark,
                         });
                     }
                     float_row(
@@ -542,7 +551,7 @@ fn gui_settings(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn debug_settings(ui: &mut egui::Ui, state: &mut AppState) {
+fn debug_settings(ui: &mut Ui, state: &mut AppState) {
     /*
     CollapsingState::load_with_default_open(
         ui.ctx(),
@@ -558,7 +567,7 @@ fn debug_settings(ui: &mut egui::Ui, state: &mut AppState) {
     CollapsingHeader::new("Debug")
         .default_open(true)
         .show(ui, |ui| {
-            egui::Grid::new("gui_settings_grid")
+            Grid::new("gui_settings_grid")
                 .num_columns(1)
                 .spacing([40.0, 4.0])
                 .striped(true)
@@ -597,7 +606,7 @@ fn debug_settings(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn stats(ui: &mut egui::Ui, state: &mut AppState) {
+fn stats(ui: &mut Ui, state: &mut AppState) {
     CollapsingHeader::new("Stats")
         .default_open(true)
         .show(ui, |ui| {
@@ -622,11 +631,11 @@ fn stats(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn bool_row(ui: &mut egui::Ui, value: &mut BoolResettable, label: &str, tooltip: &str) -> bool {
+fn bool_row(ui: &mut Ui, value: &mut BoolResettable, label: &str, tooltip: &str) -> bool {
     let mut changed = false;
     property_row(ui, ROW_SPLIT, "", |ui| {
         let response = ui.checkbox(value.get_mut(), label).on_hover_text(tooltip);
-        egui::Popup::context_menu(&response)
+        Popup::context_menu(&response)
             .id(ui.make_persistent_id(label))
             .show(|ui| {
                 if ui.button("Reset to Default").clicked() {
@@ -640,19 +649,14 @@ fn bool_row(ui: &mut egui::Ui, value: &mut BoolResettable, label: &str, tooltip:
     changed
 }
 
-fn combo_row<R: Resettable<E>, E>(
-    ui: &mut egui::Ui,
-    value: &mut R,
-    label: &str,
-    tooltip: &str,
-) -> bool
+fn combo_row<R: Resettable<E>, E>(ui: &mut Ui, value: &mut R, label: &str, tooltip: &str) -> bool
 where
     E: IntoEnumIterator + std::fmt::Display + Copy + PartialEq,
 {
     let old_value = value.get();
 
     property_row(ui, ROW_SPLIT, label, |ui| {
-        let response = egui::ComboBox::from_id_salt(label)
+        let response = ComboBox::from_id_salt(label)
             .width(ui.available_width())
             .selected_text(value.get().to_string())
             .show_ui(ui, |ui| {
@@ -663,7 +667,7 @@ where
             .response
             .on_hover_text(tooltip);
 
-        egui::Popup::context_menu(&response)
+        Popup::context_menu(&response)
             .id(ui.make_persistent_id(label))
             .show(|ui| {
                 if ui.button("Reset to Default").clicked() {
@@ -676,7 +680,7 @@ where
 }
 
 fn float_row(
-    ui: &mut egui::Ui,
+    ui: &mut Ui,
     value: &mut F32Resettable,
     label: &str,
     tooltip: &str,
@@ -696,7 +700,7 @@ fn float_row(
             )
             .on_hover_text(tooltip);
         // right click menu
-        egui::Popup::context_menu(&response)
+        Popup::context_menu(&response)
             .id(ui.make_persistent_id(label))
             .show(|ui| {
                 if ui.button("Reset to Default").clicked() {
@@ -713,8 +717,8 @@ fn float_row(
     changed
 }
 
-fn integer_row<R: Resettable<T>, T: num::Integer + num::NumCast + egui::emath::Numeric>(
-    ui: &mut egui::Ui,
+fn integer_row<R: Resettable<T>, T: num::Integer + num::NumCast + emath::Numeric>(
+    ui: &mut Ui,
     value: &mut R,
     label: &str,
     tooltip: &str,
@@ -748,12 +752,7 @@ fn integer_row<R: Resettable<T>, T: num::Integer + num::NumCast + egui::emath::N
     changed
 }
 
-fn percentage_row(
-    ui: &mut egui::Ui,
-    value: &mut F32Resettable,
-    label: &str,
-    tooltip: &str,
-) -> bool {
+fn percentage_row(ui: &mut Ui, value: &mut F32Resettable, label: &str, tooltip: &str) -> bool {
     let mut changed = false;
     property_row(ui, ROW_SPLIT, label, |ui| {
         let before = value.value;
@@ -768,7 +767,7 @@ fn percentage_row(
             )
             .on_hover_text(tooltip);
         // right click menu
-        egui::Popup::context_menu(&response)
+        Popup::context_menu(&response)
             .id(ui.make_persistent_id(label))
             .show(|ui| {
                 if ui.button("Reset to Default").clicked() {
@@ -787,12 +786,7 @@ fn percentage_row(
     changed
 }
 
-fn property_row(
-    ui: &mut egui::Ui,
-    split: f32,
-    label: &str,
-    add_widget: impl FnOnce(&mut egui::Ui),
-) {
+fn property_row(ui: &mut Ui, split: f32, label: &str, add_widget: impl FnOnce(&mut Ui)) {
     let spacing = ui.spacing().item_spacing.x;
     let width = ui.available_width();
 
@@ -804,7 +798,7 @@ fn property_row(
     ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
             egui::vec2(lhs, height),
-            egui::Layout::right_to_left(egui::Align::Center),
+            egui::Layout::right_to_left(Align::Center),
             |ui| {
                 ui.label(label);
             },

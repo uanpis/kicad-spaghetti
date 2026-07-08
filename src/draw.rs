@@ -1,5 +1,4 @@
 use crate::colors::COPPER_COLORS;
-use crate::physics::{Point, PointType};
 use crate::sim::Snapshot;
 use crate::utils::*;
 use wgpu::include_wgsl;
@@ -14,18 +13,11 @@ pub struct GpuVertex {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct GpuGlobals {
-    pub pan: [f32; 2],
-    pub zoom: f32,
-    pub _pad: i32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
 pub struct ScreenInfo {
     pub size: [u32; 2],
+    pub pan: [f32; 2],
+    pub zoom: f32,
     pub aspect_ratio: f32,
-    pub _pad: i32,
 }
 
 #[repr(C)]
@@ -59,7 +51,6 @@ pub struct TriangleInstance {
 pub struct Draw2D {
     pub render_settings: RenderSettings,
 
-    pub globals_ubo: wgpu::Buffer,
     pub screen_info_ubo: wgpu::Buffer,
 
     pub bind_group: wgpu::BindGroup,
@@ -107,7 +98,6 @@ impl Draw2D {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
-        snapshot: &Snapshot,
     ) -> Self {
         let render_settings = RenderSettings {
             quadtree: false.into(),
@@ -178,23 +168,7 @@ impl Draw2D {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        // globals
-        let globals_ubo = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Globals UBO"),
-            size: std::mem::size_of::<GpuGlobals>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(
-            &globals_ubo,
-            0,
-            bytemuck::cast_slice(&[GpuGlobals {
-                pan: [0.0, 0.0],
-                zoom: 1.0,
-                _pad: 0,
-            }]),
-        );
-
+        // screen info
         let screen_info_ubo = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Screen Info UBO"),
             size: std::mem::size_of::<ScreenInfo>() as u64,
@@ -206,57 +180,36 @@ impl Draw2D {
             0,
             bytemuck::cast_slice(&[ScreenInfo {
                 size: [1024; 2],
+                pan: [0.0, 0.0],
+                zoom: 1.0,
                 aspect_ratio: 1.0,
-                _pad: 0,
             }]),
         );
 
         // layout + bind
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<GpuGlobals>() as u64
-                        ),
-                    },
-                    count: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<ScreenInfo>() as u64
+                    ),
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<ScreenInfo>() as u64
-                        ),
-                    },
-                    count: None,
-                },
-            ],
+                count: None,
+            }],
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("BG"),
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(globals_ubo.as_entire_buffer_binding()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(
-                        screen_info_ubo.as_entire_buffer_binding(),
-                    ),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(screen_info_ubo.as_entire_buffer_binding()),
+            }],
         });
 
         // shaders
@@ -279,6 +232,7 @@ impl Draw2D {
             Max,
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn create_pipeline<'a>(
             device: &wgpu::Device,
             label: &str,
@@ -443,7 +397,6 @@ impl Draw2D {
         Self {
             render_settings,
 
-            globals_ubo,
             screen_info_ubo,
             bind_group,
 
@@ -474,10 +427,6 @@ impl Draw2D {
             0,
             bytemuck::cast_slice(&[screen_info]),
         );
-    }
-
-    pub fn update_globals(&self, queue: &wgpu::Queue, globals: GpuGlobals) {
-        queue.write_buffer(&self.globals_ubo, 0, bytemuck::cast_slice(&[globals]));
     }
 
     pub fn render(&self, render_pass: &mut wgpu::RenderPass) {
@@ -724,7 +673,7 @@ fn build_circle_pads(
                 .flat_map(|fp| fp.attached_points.iter()),
         )
         .map(|i| {
-            let mut color = {
+            let color = {
                 fn hue(seed: usize) -> [f32; 4] {
                     let t = 2.399963 * seed as f32;
                     [
@@ -862,8 +811,6 @@ fn build_debug_tree(snapshot: &Snapshot) -> Vec<GpuVertex> {
         .collect()
 }
 
-unsafe impl bytemuck::Pod for GpuGlobals {}
-unsafe impl bytemuck::Zeroable for GpuGlobals {}
 unsafe impl bytemuck::Pod for ScreenInfo {}
 unsafe impl bytemuck::Zeroable for ScreenInfo {}
 unsafe impl bytemuck::Pod for GpuVertex {}

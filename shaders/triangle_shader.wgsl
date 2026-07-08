@@ -1,14 +1,10 @@
-struct Globals {
-    pan: vec2<f32>,
-    zoom: f32,
-}
-@group(0) @binding(0) var<uniform> globals: Globals;
-
 struct ScreenInfo {
     size: vec2<u32>,
+    pan: vec2<f32>,
+    zoom: f32,
     aspect_ratio: f32,
 }
-@group(0) @binding(1) var<uniform> screen_info: ScreenInfo;
+@group(0) @binding(0) var<uniform> screen_info: ScreenInfo;
 
 struct VertIn {
     @location(0) uv: vec2<f32>,
@@ -34,7 +30,7 @@ struct VertOut {
 }
 
 fn to_screen_space(world: vec2<f32>) -> vec4<f32> {
-    let v = (world + globals.pan) * globals.zoom;
+    let v = (world + screen_info.pan) * screen_info.zoom;
     return vec4<f32>(v.x / screen_info.aspect_ratio, -v.y, 0.0, 1.0);
 }
 
@@ -50,7 +46,7 @@ fn corner_normal(edge_normal_0: vec2<f32>, edge_normal_1: vec2<f32>) -> vec2<f32
 
     @vertex
 fn vs_main(in: VertIn) -> VertOut {
-    let pixel_size = 2.0 / (globals.zoom * f32(screen_info.size.y));
+    let pixel_size = 2.0 / (screen_info.zoom * f32(screen_info.size.y));
 
     let fac0 = 1 - in.uv.x - in.uv.y;
     let fac1 = in.uv.x;
@@ -81,7 +77,7 @@ fn vs_main(in: VertIn) -> VertOut {
     out.n20 = n20;
     out.color = in.color;
     out.radius = in.radius;
-    out.scale = f32(screen_info.size.y) * globals.zoom;
+    out.scale = f32(screen_info.size.y) * screen_info.zoom;
     return out;
 }
 
