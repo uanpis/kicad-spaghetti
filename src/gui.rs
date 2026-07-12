@@ -1,5 +1,5 @@
 use crate::app::AppState;
-use crate::draw::{Draw2D, ScreenInfo};
+use crate::draw::{Draw2D, Globals};
 use crate::utils::*;
 use egui::{
     Align, Button, CentralPanel, CollapsingHeader, ComboBox, Context, Event, Frame, Grid, Layout,
@@ -51,7 +51,12 @@ impl EguiRenderer {
         let mut egui_renderer = Renderer::new(
             &state.device,
             state.surface_config.format,
-            RendererOptions::default(),
+            egui_wgpu::RendererOptions {
+                msaa_samples: 0,
+                depth_stencil_format: Some(wgpu::TextureFormat::Depth32Float),
+                dithering: true,
+                predictable_texture_filtering: false,
+            },
         );
         egui_renderer
             .callback_resources
@@ -85,6 +90,7 @@ impl EguiRenderer {
         encoder: &mut CommandEncoder,
         window: &Window,
         window_surface_view: &TextureView,
+        depth_view: &TextureView,
         screen_descriptor: ScreenDescriptor,
     ) {
         if !self.frame_started {
@@ -118,7 +124,14 @@ impl EguiRenderer {
                     store: StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             label: Some("egui main render pass"),
             occlusion_query_set: None,
@@ -164,9 +177,9 @@ impl CallbackTrait for Draw2DCallback {
         let draw2d = draw2d_arc.lock().unwrap();
         let size = self.screen_size;
 
-        draw2d.update_screen_info(
+        draw2d.update_globals(
             queue,
-            ScreenInfo {
+            Globals {
                 size,
                 zoom: self.zoom,
                 pan: self.pan.into(),

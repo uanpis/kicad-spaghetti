@@ -1,16 +1,19 @@
-struct ScreenInfo {
+const LAYER_MULTIPLIER = 0.001f;
+
+struct Globals {
     size: vec2<u32>,
     pan: vec2<f32>,
     zoom: f32,
     aspect_ratio: f32,
 }
-@group(0) @binding(0) var<uniform> screen_info: ScreenInfo;
+@group(0) @binding(0) var<uniform> globals: Globals;
 
 struct VertIn {
     @location(0) uv: vec2<f32>,
     @location(1) center: vec2<f32>,
     @location(2) radius: f32,
     @location(3) color: vec4<f32>,
+    @location(4) layer: u32,
 }
 
 struct VertOut {
@@ -21,25 +24,30 @@ struct VertOut {
     @location(3)       scale: f32,
 }
 
-fn to_screen_space(world: vec2<f32>) -> vec4<f32> {
-    let v = (world + screen_info.pan) * screen_info.zoom;
-    return vec4(v.x / screen_info.aspect_ratio, -v.y, 0.0, 1.0);
+fn to_screen_space(world: vec2<f32>, layer: u32) -> vec4<f32> {
+    let v = (world + globals.pan) * globals.zoom;
+    return vec4<f32>(
+        v.x / globals.aspect_ratio,
+        -v.y,
+        f32(layer) * LAYER_MULTIPLIER,
+        1.0
+    );
 }
 
 @vertex
 fn vs_main(in: VertIn) -> VertOut {
-    let pixel_size = 1.0 / (screen_info.zoom * f32(screen_info.size.y));
+    let pixel_size = 1.0 / (globals.zoom * f32(globals.size.y));
     let pixel_offset = (in.uv - 0.5) * pixel_size;
 
     let local = (in.uv * 2.0 - vec2<f32>(1.0)) * in.radius + pixel_offset;
     let world = in.center + local;
 
     var out: VertOut;
-    out.clip_pos = to_screen_space(world);
+    out.clip_pos = to_screen_space(world, in.layer);
     out.local_pos = local;
     out.color = in.color;
     out.radius = in.radius;
-    out.scale = f32(screen_info.size.y) * screen_info.zoom;
+    out.scale = f32(globals.size.y) * globals.zoom;
     return out;
 }
 

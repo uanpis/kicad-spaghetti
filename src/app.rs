@@ -31,9 +31,11 @@ pub struct AppState {
     pub queue: wgpu::Queue,
     pub surface_config: wgpu::SurfaceConfiguration,
     pub surface: wgpu::Surface<'static>,
+    pub depth_texture: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
+
     pub scale_factor: F32Resettable,
     pub color_theme: ColorThemeResettable,
-
     pub zoom: f32,
     pub pan: Vec2,
 }
@@ -88,6 +90,22 @@ impl AppState {
             view_formats: vec![],
         };
 
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: surface_config.width,
+                height: surface_config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         surface.configure(&device, &surface_config);
 
         let sim = Sim::new();
@@ -110,9 +128,11 @@ impl AppState {
             queue,
             surface,
             surface_config,
+            depth_texture,
+            depth_view,
+
             scale_factor: 1.0.into(),
             color_theme: ColorTheme::System.into(),
-
             zoom: 1.0,
             pan: Vec2::ZERO,
         }
@@ -179,9 +199,29 @@ impl App {
     }
 
     fn handle_resized(&mut self, width: u32, height: u32) {
+        let state = self.state.as_mut().unwrap();
         if width > 0 && height > 0 {
-            self.state.as_mut().unwrap().resize_surface(width, height);
+            state.resize_surface(width, height);
         }
+
+        // depth texture must match the new surface size exactly
+        state.depth_texture = state.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        state.depth_view = state
+            .depth_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
     }
 
     fn handle_redraw(&mut self) {
@@ -208,8 +248,6 @@ impl App {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        //state.draw2d.render_to_texture(&mut encoder, &texture_view);
-
         let window = self.window.as_ref().unwrap();
         {
             let egui_renderer = self.egui_renderer.as_mut().unwrap();
@@ -221,6 +259,7 @@ impl App {
                 &mut encoder,
                 window,
                 &texture_view,
+                &state.depth_view,
                 screen_descriptor,
             );
         }

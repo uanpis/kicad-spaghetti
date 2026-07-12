@@ -4,6 +4,8 @@ use crate::utils::*;
 use wgpu::include_wgsl;
 use wgpu::util::DeviceExt;
 
+const DEBUG_LAYER: u32 = 0;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct GpuVertex {
@@ -13,7 +15,7 @@ pub struct GpuVertex {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
-pub struct ScreenInfo {
+pub struct Globals {
     pub size: [u32; 2],
     pub pan: [f32; 2],
     pub zoom: f32,
@@ -27,6 +29,7 @@ pub struct EdgeInstance {
     pub p1: [f32; 2],
     pub radius: f32,
     pub color: [f32; 4],
+    pub layer: u32,
 }
 
 #[repr(C)]
@@ -35,6 +38,7 @@ pub struct CircleInstance {
     pub center: [f32; 2],
     pub radius: f32,
     pub color: [f32; 4],
+    pub layer: u32,
 }
 
 #[repr(C)]
@@ -45,13 +49,22 @@ pub struct TriangleInstance {
     pub p2: [f32; 2],
     pub color: [f32; 4],
     pub radius: f32,
+    pub layer: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LayerData {
+    alphas: [f32; 64],
+    order: [u32; 64],
+    active_count: u32,
 }
 
 #[derive(Debug)]
 pub struct Draw2D {
     pub render_settings: RenderSettings,
 
-    pub screen_info_ubo: wgpu::Buffer,
+    pub globals_ubo: wgpu::Buffer,
 
     pub bind_group: wgpu::BindGroup,
     pub quad_vbo: wgpu::Buffer,
@@ -117,6 +130,8 @@ impl Draw2D {
             [0.0, 1.0],
         ];
 
+        /* initialize data */
+
         // edge instance buffer
         let edge_instances = Vec::<EdgeInstance>::new();
         let edge_instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -169,16 +184,16 @@ impl Draw2D {
         });
 
         // screen info
-        let screen_info_ubo = device.create_buffer(&wgpu::BufferDescriptor {
+        let globals_ubo = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Screen Info UBO"),
-            size: std::mem::size_of::<ScreenInfo>() as u64,
+            size: std::mem::size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         queue.write_buffer(
-            &screen_info_ubo,
+            &globals_ubo,
             0,
-            bytemuck::cast_slice(&[ScreenInfo {
+            bytemuck::cast_slice(&[Globals {
                 size: [1024; 2],
                 pan: [0.0, 0.0],
                 zoom: 1.0,
@@ -186,30 +201,37 @@ impl Draw2D {
             }]),
         );
 
-        // layout + bind
+        /* bind */
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<ScreenInfo>() as u64
-                    ),
+            entries: &[
+                // screen info
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<Globals>() as u64
+                        ),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+            ],
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("BG"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(screen_info_ubo.as_entire_buffer_binding()),
-            }],
+            entries: &[
+                // screen info
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(globals_ubo.as_entire_buffer_binding()),
+                },
+            ],
         });
 
         // shaders
@@ -284,7 +306,13 @@ impl Draw2D {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: None,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
@@ -298,11 +326,13 @@ impl Draw2D {
             2 => Float32x2,  // p1
             3 => Float32,    // radius
             4 => Float32x4,  // color
+            5 => Uint32,     // layer
         ];
         let circle_instance_attrs = wgpu::vertex_attr_array![
             1 => Float32x2, // center
             2 => Float32,   // radius
             3 => Float32x4, // color
+            4 => Uint32,     // layer
         ];
         let triangle_instance_attrs = wgpu::vertex_attr_array![
             1 => Float32x2, // p0
@@ -310,6 +340,7 @@ impl Draw2D {
             3 => Float32x2, // p2
             4 => Float32x4, // color
             5 => Float32,   // radius
+            6 => Uint32,    // layer
         ];
         let line_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
@@ -397,7 +428,7 @@ impl Draw2D {
         Self {
             render_settings,
 
-            screen_info_ubo,
+            globals_ubo,
             bind_group,
 
             quad_vbo,
@@ -421,12 +452,8 @@ impl Draw2D {
         }
     }
 
-    pub fn update_screen_info(&self, queue: &wgpu::Queue, screen_info: ScreenInfo) {
-        queue.write_buffer(
-            &self.screen_info_ubo,
-            0,
-            bytemuck::cast_slice(&[screen_info]),
-        );
+    pub fn update_globals(&self, queue: &wgpu::Queue, globals: Globals) {
+        queue.write_buffer(&self.globals_ubo, 0, bytemuck::cast_slice(&[globals]));
     }
 
     pub fn render(&self, render_pass: &mut wgpu::RenderPass) {
@@ -626,6 +653,7 @@ fn build_edge_instances(
                     p1: [p1.x, p1.y],
                     radius: edge.w * 0.5,
                     color,
+                    layer: snapshot.points[edge.i0].layer as u32,
                 }
             })
         })
@@ -640,6 +668,7 @@ fn _build_point_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
             center: point.pos.into(),
             radius: point.rad,
             color: [0.8, 0.2, 0.1, 1.0],
+            layer: point.layer as u32,
         })
         .collect()
 }
@@ -653,6 +682,7 @@ fn build_mass_circles(snapshot: &Snapshot) -> Vec<CircleInstance> {
             center: [node.data.pos.x, node.data.pos.y],
             radius: node.data.mass.sqrt(),
             color: [0.8, 0.2, 0.1, 0.4],
+            layer: DEBUG_LAYER,
         })
         .collect()
 }
@@ -694,6 +724,7 @@ fn build_circle_pads(
                 center: point.pos.into(),
                 radius: point.rad,
                 color,
+                layer: point.layer as u32,
             }
         })
         .collect()
@@ -754,6 +785,7 @@ fn build_polygon_triangles(snapshot: &Snapshot, colors: &[[f32; 4]]) -> Vec<Tria
                     p2,
                     color: colors[layer],
                     radius,
+                    layer: layer as u32,
                 }
             })
         })
@@ -783,6 +815,7 @@ fn build_footprint_outlines(snapshot: &Snapshot) -> Vec<EdgeInstance> {
                     p1: (transform.mul_vec2(next.pos) + pos).into(),
                     radius: point.w,
                     color: if layer { color_front } else { color_back },
+                    layer: layer.into(),
                 });
             }
             v
@@ -811,8 +844,8 @@ fn build_debug_tree(snapshot: &Snapshot) -> Vec<GpuVertex> {
         .collect()
 }
 
-unsafe impl bytemuck::Pod for ScreenInfo {}
-unsafe impl bytemuck::Zeroable for ScreenInfo {}
+unsafe impl bytemuck::Pod for Globals {}
+unsafe impl bytemuck::Zeroable for Globals {}
 unsafe impl bytemuck::Pod for GpuVertex {}
 unsafe impl bytemuck::Zeroable for GpuVertex {}
 unsafe impl bytemuck::Pod for EdgeInstance {}
