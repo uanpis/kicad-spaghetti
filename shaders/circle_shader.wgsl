@@ -1,4 +1,4 @@
-const LAYER_MULTIPLIER = 0.001f;
+const LAYER_MULTIPLIER = 0.0001f;
 
 struct Globals {
     size: vec2<u32>,
