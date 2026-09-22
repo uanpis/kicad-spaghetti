@@ -88,6 +88,14 @@ pub struct Draw2D {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display, strum_macros::EnumIter)]
+pub enum InactiveLayerMode {
+    All,
+    Dimmed,
+    Hidden,
+}
+impl_resettable!(InactiveLayerModeResettable, InactiveLayerMode);
+
+#[derive(Clone, Copy, Debug, PartialEq, strum_macros::Display, strum_macros::EnumIter)]
 pub enum ColorMode {
     //#[strum(to_string = "Layer (Default)")]
     Layer,
@@ -104,6 +112,8 @@ pub struct RenderSettings {
     pub mass_circles: BoolResettable,
     pub color_mode: ColorModeResettable,
     pub edge_mark: BoolResettable,
+    pub active_layer: UsizeResettable,
+    pub inactive_layer_mode: InactiveLayerModeResettable,
 }
 
 impl Draw2D {
@@ -118,6 +128,8 @@ impl Draw2D {
             mass_circles: false.into(),
             color_mode: ColorMode::Layer.into(),
             edge_mark: false.into(),
+            active_layer: 0.into(),
+            inactive_layer_mode: InactiveLayerMode::All.into(),
         };
 
         const TRI_VERTS: &[[f32; 2]] = &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
@@ -549,7 +561,17 @@ impl Draw2D {
         if self.render_settings.mass_circles.get() {
             circle_instances.extend(build_mass_circles(snapshot));
         }
-        //circle_instances.extend(build_point_circles(snapshot));
+        if matches!(
+            self.render_settings.inactive_layer_mode.get(),
+            InactiveLayerMode::Dimmed
+        ) {
+            circle_instances.push(CircleInstance {
+                center: [0.0, 0.0],
+                radius: 10000.0,
+                color: [0.0, 0.0, 0.0, 0.9],
+                layer: 1,
+            });
+        }
 
         let circle_count = circle_instances.len() as u32;
         if circle_count == self.circle_instance_count {

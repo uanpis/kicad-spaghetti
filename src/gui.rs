@@ -17,7 +17,7 @@ use winit::event::WindowEvent;
 use winit::window::Window;
 
 const FPS_INTERVAL_MS: u128 = 500;
-const ROW_SPLIT: f32 = 0.3;
+const ROW_SPLIT: f32 = 0.4;
 
 pub struct EguiRenderer {
     state: egui_winit::State,
@@ -375,6 +375,8 @@ fn right_panel(ui: &mut Ui, state: &mut AppState) {
                 ui.add(Separator::default().grow(8.0));
                 sim_settings(ui, state);
                 ui.add(Separator::default().grow(8.0));
+                layers(ui, state);
+                ui.add(Separator::default().grow(8.0));
                 graphics_settings(ui, state);
                 ui.add(Separator::default().grow(8.0));
                 stats(ui, state);
@@ -522,6 +524,38 @@ fn sim_settings_extra(ui: &mut Ui, state: &mut AppState) -> bool {
     changed
 }
 
+fn layers(ui: &mut Ui, state: &mut AppState) {
+    CollapsingHeader::new("Layers")
+        .default_open(true)
+        .show(ui, |ui| {
+            combo_row(
+                ui,
+                &mut state
+                    .draw2d
+                    .lock()
+                    .unwrap()
+                    .render_settings
+                    .inactive_layer_mode,
+                "Inactive Layers",
+                "Change how inactive layers are shown",
+            );
+            ScrollArea::vertical().show(ui, |ui| {
+                ui.add(Separator::default().grow(8.0));
+                Grid::new("gui_settings_grid")
+                    .num_columns(1)
+                    .spacing([40.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let mut x = true;
+                        layer_row(ui, &mut x, false, "layer");
+                        layer_row(ui, &mut x, false, "layer");
+                        layer_row(ui, &mut x, false, "layer");
+                        layer_row(ui, &mut x, false, "layer");
+                    });
+            });
+        });
+}
+
 fn graphics_settings(ui: &mut Ui, state: &mut AppState) {
     CollapsingHeader::new("Graphics")
         .default_open(false)
@@ -594,7 +628,7 @@ fn debug_settings(ui: &mut Ui, state: &mut AppState) {
                     bool_row(
                         ui,
                         &mut draw2d.render_settings.edge_mark,
-                        "Highlight Collisions",
+                        "Collisions",
                         "Color Colliding Edges in Red",
                     );
                     bool_row(
@@ -818,6 +852,14 @@ fn property_row(ui: &mut Ui, split: f32, label: &str, add_widget: impl FnOnce(&m
         );
 
         ui.allocate_ui(egui::vec2(rhs, height), add_widget);
+    });
+    ui.end_row();
+}
+
+fn layer_row(ui: &mut Ui, visible: &mut bool, selected: bool, label: &str) {
+    ui.horizontal(|ui| {
+        ui.checkbox(visible, "");
+        ui.label(label);
     });
     ui.end_row();
 }
